@@ -168,7 +168,6 @@ class HMMRegimeDetector:
 
         filtered = self._forward_filter(features)
         mode_id = max(range(4), key=lambda i: filtered[i])
-
         confidence = float(filtered[mode_id])
         confidence_min = float(getattr(self.p, "hmm_min_confidence", 0.45))
 
@@ -257,7 +256,6 @@ class HMMRegimeDetector:
 
         num = sum((x[i] - x_mean) * (y[i] - y_mean) for i in range(window))
         slope = float(num / denom)
-
         return slope / max(float(y_mean), 1e-9)
 
 
