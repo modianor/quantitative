@@ -3,8 +3,6 @@
 
 import math
 
-import numpy as np
-
 class RegimeDetector:
     MODE_TREND = 0
     MODE_TOPCHOP = 1
@@ -137,27 +135,27 @@ class HMMRegimeDetector:
         self.mode_counter = 0
         self.mode_buffer_days = int(getattr(self.p, "hmm_mode_buffer_days", 2))
 
-        self.posterior = np.array([0.70, 0.10, 0.10, 0.10], dtype=float)
-        self.transition = np.array([
+        self.posterior = [0.70, 0.10, 0.10, 0.10]
+        self.transition = [
             [0.80, 0.15, 0.03, 0.02],
             [0.25, 0.60, 0.10, 0.05],
             [0.15, 0.10, 0.70, 0.05],
             [0.35, 0.10, 0.10, 0.45],
-        ], dtype=float)
+        ]
 
         # 发射分布特征顺序：dd, atrp, cross_rate, slope
-        self.means = np.array([
+        self.means = [
             [-0.05, 0.030, 0.15, +0.0012],  # TREND_RUN
             [-0.08, 0.025, 0.45, +0.0002],  # TOP_CHOP
             [-0.26, 0.090, 0.35, -0.0010],  # DRAWDOWN
             [-0.36, 0.055, 0.20, +0.0005],  # BASE_BUILD
-        ], dtype=float)
-        self.stds = np.array([
+        ]
+        self.stds = [
             [0.05, 0.015, 0.20, 0.0012],
             [0.06, 0.012, 0.24, 0.0010],
             [0.10, 0.030, 0.20, 0.0018],
             [0.08, 0.020, 0.16, 0.0015],
-        ], dtype=float)
+        ]
 
     def get_mode(self):
         min_bars = int(max(self.p.min_bars_required, getattr(self.p, "hmm_warmup_bars", 240)))
@@ -169,7 +167,8 @@ class HMMRegimeDetector:
             return self.fallback.get_mode()
 
         filtered = self._forward_filter(features)
-        mode_id = int(np.argmax(filtered))
+        mode_id = max(range(4), key=lambda i: filtered[i])
+
         confidence = float(filtered[mode_id])
         confidence_min = float(getattr(self.p, "hmm_min_confidence", 0.45))
 
@@ -194,63 +193,71 @@ class HMMRegimeDetector:
         return self.last_mode, self.MODE_NAMES[self.last_mode]
 
     def _extract_features(self):
-        close = float(self.strat.data.close[0])
-        if close <= 0:
+        try:
+            close = float(self.strat.data.close[0])
+            if close <= 0:
+                return None
+
+            hh = max(float(self.strat.hh_stage[0]), 1e-9)
+            dd = close / hh - 1.0
+
+            atrv = float(self.strat.atr[0])
+            atrp = atrv / max(close, 1e-9)
+
+            lookback = int(getattr(self.p, "stage_lookback", 60))
+            cross_cnt = self.fallback._count_cross_ema20_cached(lookback)
+            cross_rate = min(float(cross_cnt) / max(float(lookback), 1.0), 1.0)
+
+            slope = self._ema20_slope(int(getattr(self.p, "slope_win", 10)))
+            return [dd, atrp, cross_rate, slope]
+        except Exception:
             return None
 
-        hh = max(float(self.strat.hh_stage[0]), 1e-9)
-        dd = close / hh - 1.0
+    def _forward_filter(self, x_t):
+        pred = [0.0, 0.0, 0.0, 0.0]
+        for j in range(4):
+            pred[j] = sum(self.posterior[i] * self.transition[i][j] for i in range(4))
 
-        atrv = float(self.strat.atr[0])
-        atrp = atrv / max(close, 1e-9)
-
-        cross_cnt = self.fallback._count_cross_ema20_cached(self.p.stage_lookback)
-        cross_rate = min(float(cross_cnt) / max(float(self.p.stage_lookback), 1.0), 1.0)
-
-        slope = self._ema20_slope(int(getattr(self.p, "slope_win", 10)))
-        return np.array([dd, atrp, cross_rate, slope], dtype=float)
-
-    def _forward_filter(self, x_t: np.ndarray):
-        pred = self.posterior @ self.transition
         emissions = self._gaussian_emissions(x_t)
-        unnorm = pred * emissions
-        denom = float(unnorm.sum())
+        unnorm = [pred[i] * emissions[i] for i in range(4)]
+        denom = float(sum(unnorm))
 
         if denom <= 1e-12:
             self.posterior = pred
             return pred
 
-        self.posterior = unnorm / denom
+        self.posterior = [v / denom for v in unnorm]
         return self.posterior
 
-    def _gaussian_emissions(self, x_t: np.ndarray):
-        vals = []
-        for s in range(4):
-            vals.append(self._diag_gaussian_pdf(x_t, self.means[s], self.stds[s]))
-        return np.array(vals, dtype=float)
+    def _gaussian_emissions(self, x_t):
+        return [self._diag_gaussian_pdf(x_t, self.means[s], self.stds[s]) for s in range(4)]
 
     @staticmethod
-    def _diag_gaussian_pdf(x: np.ndarray, mu: np.ndarray, sigma: np.ndarray) -> float:
+    def _diag_gaussian_pdf(x, mu, sigma) -> float:
         # 独立高斯，log域防止下溢
-        safe_sigma = np.maximum(sigma, 1e-6)
-        z = (x - mu) / safe_sigma
-        logp = -0.5 * np.sum(z * z) - np.sum(np.log(safe_sigma)) - 0.5 * len(x) * math.log(2.0 * math.pi)
+        safe_sigma = [max(float(s), 1e-6) for s in sigma]
+        logp = 0.0
+        for xi, mi, si in zip(x, mu, safe_sigma):
+            z = (float(xi) - float(mi)) / si
+            logp += -0.5 * z * z - math.log(si) - 0.5 * math.log(2.0 * math.pi)
         return float(math.exp(max(logp, -100.0)))
 
     def _ema20_slope(self, window: int) -> float:
         if len(self.strat.ema20) < window:
             return 0.0
 
-        x = np.arange(window, dtype=float)
-        x_mean = x.mean()
-        y = np.array([float(self.strat.ema20[-i]) for i in range(window - 1, -1, -1)], dtype=float)
-        y_mean = y.mean()
+        x = list(range(window))
+        x_mean = sum(x) / float(window)
+        y = [float(self.strat.ema20[-i]) for i in range(window - 1, -1, -1)]
+        y_mean = sum(y) / float(window)
 
-        denom = float(np.sum((x - x_mean) ** 2))
+        denom = sum((xi - x_mean) ** 2 for xi in x)
         if denom <= 0:
             return 0.0
 
-        slope = float(np.sum((x - x_mean) * (y - y_mean)) / denom)
+        num = sum((x[i] - x_mean) * (y[i] - y_mean) for i in range(window))
+        slope = float(num / denom)
+
         return slope / max(float(y_mean), 1e-9)
 
 
