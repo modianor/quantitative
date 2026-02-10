@@ -178,6 +178,10 @@ def run_backtest(
         base_probe_cooldown=10,
         base_pyramid_profit_th=5.0,
         require_main_uptrend=True,
+        use_hmm_regime=True,
+        hmm_warmup_bars=240,
+        hmm_min_confidence=0.45,
+        hmm_mode_buffer_days=2,
         print_log=True,
     )
 
@@ -204,6 +208,7 @@ def run_backtest(
     print(f"止盈: {strategy_params['profit_take_pct']}%")
     print(f"Chandelier: {strategy_params.get('chand_atr_mult', 2.8)}")
     print(f"量能要求: {strategy_params.get('vol_ratio_min', 1.2)}x")
+    print(f"Regime引擎: {'HMM' if strategy_params.get('use_hmm_regime', True) else 'RULE'}")
     print(f"{'=' * 60}\n")
 
     cerebro.addstrategy(OptimizedHybrid4ModeV2, **strategy_params)

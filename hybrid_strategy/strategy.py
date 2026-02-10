@@ -3,7 +3,7 @@
 
 import backtrader as bt
 
-from .managers import RegimeDetector, PositionManager, ExitManager
+from .managers import RegimeDetector, HMMRegimeDetector, PositionManager, ExitManager
 
 class OptimizedHybrid4ModeV2(bt.Strategy):
     params = dict(
@@ -41,6 +41,10 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         cooldown_bars=3,
         require_main_uptrend=True,
         allow_entry_in_top_chop=False,
+        use_hmm_regime=True,
+        hmm_warmup_bars=240,
+        hmm_min_confidence=0.45,
+        hmm_mode_buffer_days=2,
         print_log=False,
     )
 
@@ -92,7 +96,8 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         self.base_probe_counter = 0
         self.base_pyramid_count = 0
 
-        self.regime = RegimeDetector(self)
+        self.rule_regime = RegimeDetector(self)
+        self.regime = HMMRegimeDetector(self, fallback_detector=self.rule_regime) if self.p.use_hmm_regime else self.rule_regime
         self.pos_mgr = PositionManager(self)
         self.exit_mgr = ExitManager(self)
 
@@ -271,4 +276,3 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         self.pb_touched = False
         self.profit_taken = False
         self.base_pyramid_count = 0
-

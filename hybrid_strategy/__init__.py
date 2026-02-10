@@ -11,7 +11,7 @@ from .data_utils import (
     clv,
     detect_main_uptrend,
 )
-from .managers import RegimeDetector, PositionManager, ExitManager
+from .managers import RegimeDetector, HMMRegimeDetector, PositionManager, ExitManager
 from .strategy import OptimizedHybrid4ModeV2
 from .backtest import plot_mode_report, run_backtest, batch_backtest, CONFIG_LOADED
 
@@ -25,6 +25,7 @@ __all__ = [
     "clv",
     "detect_main_uptrend",
     "RegimeDetector",
+    "HMMRegimeDetector",
     "PositionManager",
     "ExitManager",
     "OptimizedHybrid4ModeV2",
