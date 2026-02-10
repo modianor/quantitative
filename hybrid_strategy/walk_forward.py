@@ -100,7 +100,12 @@ def _prepare_data(symbol: str, start: str, end: str) -> pd.DataFrame:
     return df
 
 
-def _run_slice_backtest(df: pd.DataFrame, params: Dict[str, float], cash: float = 100000) -> Dict[str, float]:
+def _run_slice_backtest(
+    df: pd.DataFrame,
+    params: Dict[str, float],
+    cash: float = 100000,
+    trade_start_date: Optional[pd.Timestamp] = None,
+) -> Dict[str, float]:
     min_required_bars = int(params.get("min_bars_required", 210))
     _validate_backtest_data("slice", df, min_required_bars)
 
@@ -111,7 +116,9 @@ def _run_slice_backtest(df: pd.DataFrame, params: Dict[str, float], cash: float 
 
     data = PandasWithSignals(dataname=df)
     cerebro.adddata(data)
-    cerebro.addstrategy(OptimizedHybrid4ModeV2, **_strategy_base_params(params))
+    runtime_params = dict(params)
+    runtime_params["trade_start_date"] = trade_start_date.date() if trade_start_date is not None else None
+    cerebro.addstrategy(OptimizedHybrid4ModeV2, **_strategy_base_params(runtime_params))
 
     cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Days, compression=1)
     cerebro.addanalyzer(bt.analyzers.DrawDown, _name="dd")
@@ -219,7 +226,16 @@ def walk_forward_validation(
                     best_score = score
                     best_params = params
 
-            test_metrics = _run_slice_backtest(test_df, best_params)
+            warmup_bars = int(best_params.get("min_bars_required", 210))
+            warmup_df = train_df.tail(warmup_bars)
+            test_with_warmup = pd.concat([warmup_df, test_df], axis=0)
+            test_with_warmup = test_with_warmup[~test_with_warmup.index.duplicated(keep="last")]
+
+            test_metrics = _run_slice_backtest(
+                test_with_warmup,
+                best_params,
+                trade_start_date=fold_test_start,
+            )
             fold = FoldResult(
                 symbol=symbol,
                 train_start=fold_train_start.strftime("%Y-%m-%d"),
