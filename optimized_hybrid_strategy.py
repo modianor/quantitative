@@ -61,4 +61,4 @@ if __name__ == "__main__":
     # print("\n" + "📊" * 30)
     # print("示例5: 批量测试指定股票")
     # print("📊" * 30)
-    # batch_backtest(symbols=["NVDA", "GOOGL", "AAPL"])
+    batch_backtest(symbols=["NVDA", "GOOGL", "AAPL"])

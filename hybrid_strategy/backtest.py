@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """回测入口与批量测试模块。"""
+import traceback
 
 import numpy as np
 import pandas as pd
@@ -310,7 +311,7 @@ def batch_backtest(symbols=None, tier=None, show_details=False):
             if not show_details:
                 sys.stdout = old_stdout
 
-            if strat:
+            if strat is not None:  # 👈 改成这样
                 # 提取结果
                 trades = strat.analyzers.trades.get_analysis()
                 total_closed = trades.get("total", {}).get("closed", 0)
@@ -341,6 +342,7 @@ def batch_backtest(symbols=None, tier=None, show_details=False):
 
         except Exception as e:
             print(f"❌ {symbol} 测试失败: {e}")
+            traceback.print_exc()  # 打印完整错误堆栈
 
     # 汇总结果
     print(f"\n{'=' * 80}")

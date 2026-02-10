@@ -102,7 +102,9 @@ class PandasWithSignals(bt.feeds.PandasData):
         ("pb_score", -1),
         ("vol_ratio", -1),
     )
-
+    # 👇 添加这两行
+    def __init__(self):
+        super(PandasWithSignals, self).__init__()
 
 # =============================
 # 主升浪打分法（pandas离线计算）
