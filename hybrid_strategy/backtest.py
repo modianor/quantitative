@@ -134,7 +134,9 @@ def run_backtest(
 
     # 2. 加载数据
     if use_yfinance:
-        df = load_from_yfinance(symbol, start="2020-01-01", end="2026-02-11")
+        today = pd.Timestamp.today().normalize()
+        end_date = (today + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        df = load_from_yfinance(symbol, start="2020-01-01", end=end_date)
     else:
         if not csv_path:
             raise ValueError("use_yfinance=False 时必须提供 csv_path")
@@ -153,8 +155,6 @@ def run_backtest(
 
     # 5. Cerebro
     cerebro = bt.Cerebro()
-    data = PandasWithSignals(dataname=df2)
-
     cerebro.broker.setcash(cash)
     cerebro.broker.setcommission(commission=commission)
 

@@ -34,6 +34,20 @@ def load_from_yfinance(symbol: str, start=None, end=None, period="5y"):
         ) from exc
 
     if raw is None or raw.empty:
+        # 有些环境下指定 start/end 会触发 yfinance 的临时异常，这里自动退回 period 再试一次
+        if start or end:
+            retry = yf.download(
+                symbol,
+                period=period,
+                interval="1d",
+                auto_adjust=False,
+                progress=False,
+                threads=False,
+            )
+            if retry is not None and not retry.empty:
+                raw = retry
+
+    if raw is None or raw.empty:
         raise ValueError(
             f"yfinance 未返回有效数据: symbol={symbol}, start={start}, end={end}, period={period}"
         )
