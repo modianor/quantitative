@@ -15,6 +15,7 @@ from .managers import RegimeDetector, HMMRegimeDetector, PositionManager, ExitMa
 from .strategy import OptimizedHybrid4ModeV2
 from .meta_labeling import TripleBarrierConfig, TripleBarrierLabeler, ExitEventMapper, LogisticMetaModel, MetaLabelingFilter, TradeMetaRecorder
 from .backtest import plot_mode_report, run_backtest, batch_backtest, CONFIG_LOADED
+from .walk_forward import walk_forward_validation
 
 __all__ = [
     "PandasWithSignals",
@@ -40,4 +41,5 @@ __all__ = [
     "run_backtest",
     "batch_backtest",
     "CONFIG_LOADED",
+    "walk_forward_validation",
 ]
