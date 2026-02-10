@@ -54,6 +54,23 @@ def _default_params(symbol: str) -> Dict[str, float]:
     return params
 
 
+def _activity_profile_overrides(profile: str) -> Dict[str, float]:
+    """通过档位控制交易活跃度。"""
+    if profile == "active":
+        return {
+            "vol_ratio_min": 0.9,
+            "add_vol_ratio_min": 0.9,
+            "base_probe_cooldown": 5,
+            "cooldown_bars": 1,
+            "cross_top_min": 10,
+            "allow_entry_in_top_chop": True,
+            "hmm_min_confidence": 0.40,
+            "meta_prob_threshold": 0.50,
+            "meta_min_samples": 20,
+        }
+    return {}
+
+
 def _strategy_base_params(custom_params: Optional[Dict[str, float]] = None) -> Dict:
     strategy_params = dict(
         max_exposure=0.60,
@@ -217,9 +234,12 @@ def walk_forward_validation(
     min_trades_train: int = 2,
     val_months: int = 6,
     top_k_train: int = 8,
+    activity_profile: str = "balanced",
 ) -> List[FoldResult]:
     if end is None:
         end = (pd.Timestamp.today().normalize() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+    print(f"[INFO] activity_profile={activity_profile}")
 
     all_results: List[FoldResult] = []
     target_years = target_years or [2022, 2024]
@@ -232,6 +252,7 @@ def walk_forward_validation(
         fold_train_start = pd.Timestamp(start)
         last_date = df.index.max()
         base_params = _default_params(symbol)
+        base_params.update(_activity_profile_overrides(activity_profile))
 
         while True:
             fold_train_end = fold_train_start + pd.DateOffset(years=train_years) - pd.Timedelta(days=1)
@@ -389,6 +410,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--min-trades-train", type=int, default=2)
     parser.add_argument("--val-months", type=int, default=6)
     parser.add_argument("--top-k-train", type=int, default=8)
+    parser.add_argument(
+        "--activity-profile",
+        choices=["balanced", "active"],
+        default="balanced",
+        help="交易活跃度档位：active 会放宽入场过滤并缩短冷却。",
+    )
     return parser.parse_args()
 
 
@@ -404,6 +431,7 @@ def main():
         min_trades_train=args.min_trades_train,
         val_months=args.val_months,
         top_k_train=args.top_k_train,
+        activity_profile=args.activity_profile,
     )
 
 
