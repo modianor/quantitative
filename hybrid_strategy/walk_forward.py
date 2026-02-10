@@ -30,6 +30,7 @@ class FoldResult:
     test_end: str
     test_year: int
     train_best_score: float
+    val_best_score: float
     test_return: float
     test_max_dd: float
     test_sharpe: float
@@ -267,7 +268,8 @@ def walk_forward_validation(
             ranked_train.sort(key=lambda x: x[0], reverse=True)
             shortlist = ranked_train[: max(1, top_k_train)]
 
-            best_score = -1e9
+            best_train_score = -1e9
+            best_val_score = -1e9
             best_params = dict(base_params)
 
             for train_score, params in shortlist:
@@ -279,10 +281,15 @@ def walk_forward_validation(
                     continue
 
                 val_score = _score_metrics(val_metrics, min_trades=max(1, min_trades_train - 1))
-                combined_score = 0.55 * train_score + 0.45 * val_score
-                if combined_score > best_score:
-                    best_score = combined_score
+                # 参数选择只依据验证期表现，避免把训练分数当作前瞻信号。
+                if val_score > best_val_score:
+                    best_train_score = train_score
+                    best_val_score = val_score
                     best_params = params
+
+            if best_val_score <= -1e9 and shortlist:
+                best_train_score, best_params = shortlist[0]
+                best_val_score = best_train_score
 
             warmup_bars = int(max(best_params.get("min_bars_required", 210), best_params.get("hmm_warmup_bars", 240)))
             test_with_warmup = _build_eval_slice(train_df, test_df, warmup_bars)
@@ -299,7 +306,8 @@ def walk_forward_validation(
                 test_start=fold_test_start.strftime("%Y-%m-%d"),
                 test_end=fold_test_end.strftime("%Y-%m-%d"),
                 test_year=fold_test_start.year,
-                train_best_score=best_score,
+                train_best_score=best_train_score,
+                val_best_score=best_val_score,
                 test_return=test_metrics["return"],
                 test_max_dd=test_metrics["max_dd"],
                 test_sharpe=test_metrics["sharpe"],
@@ -317,7 +325,8 @@ def walk_forward_validation(
 
             print(
                 f"{fold.test_year}: OOS收益={fold.test_return:+.2f}% | 回撤={fold.test_max_dd:.2f}% | "
-                f"Sharpe={fold.test_sharpe:.3f} | 交易={fold.trades} | TrainScore={fold.train_best_score:.2f}"
+                f"Sharpe={fold.test_sharpe:.3f} | 交易={fold.trades} | "
+                f"ValScore={fold.val_best_score:.2f} | TrainScore={fold.train_best_score:.2f}"
             )
 
             fold_train_start = fold_train_start + pd.DateOffset(years=test_years)
