@@ -272,8 +272,48 @@ class PositionManager:
         if price <= 0:
             return 0
         value = float(self.strat.broker.getvalue())
-        target_value = value * float(self.p.max_exposure) * float(ratio)
+        effective_exposure = self._effective_exposure(float(ratio))
+        target_value = value * effective_exposure
         return int(target_value // price)
+
+    def _effective_exposure(self, ratio: float) -> float:
+        # 兼容旧逻辑：关闭波动目标时仍是固定仓位比例
+        if not bool(getattr(self.p, "use_vol_targeting", True)):
+            return min(max(float(self.p.max_exposure) * ratio, 0.0), 1.0)
+
+        annual_vol = self._annualized_volatility()
+        target_vol = max(float(getattr(self.p, "target_vol_annual", 0.20)), 1e-6)
+        vol_scalar = target_vol / annual_vol
+
+        min_scalar = float(getattr(self.p, "min_vol_scalar", 0.30))
+        max_scalar = float(getattr(self.p, "max_vol_scalar", 1.00))
+        vol_scalar = min(max(vol_scalar, min_scalar), max_scalar)
+
+        exposure = float(self.p.max_exposure) * ratio * vol_scalar
+        return min(max(exposure, 0.0), 1.0)
+
+    def _annualized_volatility(self) -> float:
+        lookback = int(max(getattr(self.p, "vol_lookback", 20), 2))
+
+        rets = []
+        max_hist = min(len(self.strat.data.close) - 1, lookback)
+        for i in range(1, max_hist + 1):
+            c0 = float(self.strat.data.close[-i])
+            c1 = float(self.strat.data.close[-i - 1])
+            if c0 > 0 and c1 > 0:
+                rets.append(math.log(c0 / c1))
+
+        if len(rets) < 2:
+            atrp = float(self.strat.atr[0]) / max(float(self.strat.data.close[0]), 1e-9)
+            annual_vol = atrp * math.sqrt(252.0)
+        else:
+            mean_ret = sum(rets) / float(len(rets))
+            variance = sum((r - mean_ret) ** 2 for r in rets) / float(len(rets) - 1)
+            annual_vol = math.sqrt(max(variance, 0.0)) * math.sqrt(252.0)
+
+        floor_vol = float(getattr(self.p, "vol_floor_annual", 0.10))
+        cap_vol = float(getattr(self.p, "vol_cap_annual", 0.80))
+        return min(max(annual_vol, floor_vol), cap_vol)
 
     def scale_to(self, ratio: float, reason: str, mode_name: str, tag: str):
         target = self.target_size(ratio)

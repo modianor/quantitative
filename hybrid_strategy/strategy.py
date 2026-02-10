@@ -8,6 +8,13 @@ from .managers import RegimeDetector, HMMRegimeDetector, PositionManager, ExitMa
 class OptimizedHybrid4ModeV2(bt.Strategy):
     params = dict(
         max_exposure=0.60,
+        use_vol_targeting=True,
+        target_vol_annual=0.20,
+        vol_lookback=20,
+        vol_floor_annual=0.10,
+        vol_cap_annual=0.80,
+        min_vol_scalar=0.30,
+        max_vol_scalar=1.00,
         tranche_targets=(0.30, 0.60, 1.00),
         probe_ratio=0.15,
         breakout_n=20,
