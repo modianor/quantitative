@@ -8,16 +8,47 @@ import backtrader as bt
 def load_from_yfinance(symbol: str, start=None, end=None, period="5y"):
     import yfinance as yf
 
-    if start or end:
-        raw = yf.download(symbol, start=start, end=end, interval="1d", auto_adjust=False)
-    else:
-        raw = yf.download(symbol, period=period, interval="1d", auto_adjust=False)
+    try:
+        if start or end:
+            raw = yf.download(
+                symbol,
+                start=start,
+                end=end,
+                interval="1d",
+                auto_adjust=False,
+                progress=False,
+                threads=False,
+            )
+        else:
+            raw = yf.download(
+                symbol,
+                period=period,
+                interval="1d",
+                auto_adjust=False,
+                progress=False,
+                threads=False,
+            )
+    except Exception as exc:
+        raise ValueError(
+            f"yfinance 下载失败: symbol={symbol}, start={start}, end={end}, period={period}, error={exc}"
+        ) from exc
+
+    if raw is None or raw.empty:
+        raise ValueError(
+            f"yfinance 未返回有效数据: symbol={symbol}, start={start}, end={end}, period={period}"
+        )
 
     if isinstance(raw.columns, pd.MultiIndex):
         raw.columns = raw.columns.get_level_values(0)
 
     raw.columns = [str(c).strip().title() for c in raw.columns]
     raw = raw[["Open", "High", "Low", "Close", "Volume"]].dropna().copy()
+
+    if raw.empty:
+        raise ValueError(
+            f"yfinance 数据清洗后为空: symbol={symbol}, start={start}, end={end}, period={period}"
+        )
+
     raw.index.name = "Date"
     return raw
 

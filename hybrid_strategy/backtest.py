@@ -17,6 +17,15 @@ except ImportError:
     print("⚠️ 警告: 未找到stock_configs.py，使用内置配置")
     CONFIG_LOADED = False
 
+def _validate_backtest_data(symbol: str, df: pd.DataFrame, min_required_bars: int):
+    if df is None or df.empty:
+        raise ValueError(f"{symbol} 无可用K线数据，无法回测")
+
+    if len(df) < int(min_required_bars):
+        raise ValueError(
+            f"{symbol} 数据长度不足: 仅{len(df)}根K线，至少需要{int(min_required_bars)}根"
+        )
+
 def plot_mode_report(strat, symbol=""):
     dates = pd.to_datetime(strat.rec_dates)
     close = pd.Series(strat.rec_close, index=dates)
@@ -142,11 +151,10 @@ def run_backtest(
     df2["pb_score"] = df2["PbScore"].fillna(0).astype(int)
     df2["vol_ratio"] = df2["VOL_RATIO"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
-    data = PandasWithSignals(dataname=df2)
-
     # 5. Cerebro
     cerebro = bt.Cerebro()
-    cerebro.adddata(data)
+    data = PandasWithSignals(dataname=df2)
+
     cerebro.broker.setcash(cash)
     cerebro.broker.setcommission(commission=commission)
 
@@ -180,6 +188,13 @@ def run_backtest(
     if custom_params:
         strategy_params.update(custom_params)
         print(f"\n⚙️  应用自定义参数: {custom_params}")
+
+    # 回测至少需要足够数据支撑长周期指标（EMA200等）
+    min_required_bars = int(strategy_params.get("min_bars_required", 210))
+    _validate_backtest_data(symbol, df2, min_required_bars)
+
+    data = PandasWithSignals(dataname=df2)
+    cerebro.adddata(data)
 
     # 9. 显示最终配置
     print(f"\n{'=' * 60}")
