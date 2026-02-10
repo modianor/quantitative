@@ -58,6 +58,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         meta_min_samples=40,
         meta_retrain_interval=10,
         print_log=False,
+        trade_start_date=None,
     )
 
     def log(self, txt, show_position=False):
@@ -203,6 +204,9 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
 
         if self.base_probe_counter > 0:
             self.base_probe_counter -= 1
+
+        if self.p.trade_start_date is not None and dt < self.p.trade_start_date:
+            return
 
         # 持仓：出场责任链
         if self.position:
