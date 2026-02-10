@@ -17,7 +17,6 @@ except ImportError:
     print("⚠️ 警告: 未找到stock_configs.py，使用内置配置")
     CONFIG_LOADED = False
 
-
 def _validate_backtest_data(symbol: str, df: pd.DataFrame, min_required_bars: int):
     if df is None or df.empty:
         raise ValueError(f"{symbol} 无可用K线数据，无法回测")
@@ -154,6 +153,8 @@ def run_backtest(
 
     # 5. Cerebro
     cerebro = bt.Cerebro()
+    data = PandasWithSignals(dataname=df2)
+
     cerebro.broker.setcash(cash)
     cerebro.broker.setcommission(commission=commission)
 
