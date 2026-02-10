@@ -4,6 +4,7 @@
 import backtrader as bt
 
 from .managers import RegimeDetector, HMMRegimeDetector, PositionManager, ExitManager
+from .meta_labeling import MetaLabelingFilter, TradeMetaRecorder
 
 class OptimizedHybrid4ModeV2(bt.Strategy):
     params = dict(
@@ -52,6 +53,10 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         hmm_warmup_bars=240,
         hmm_min_confidence=0.45,
         hmm_mode_buffer_days=2,
+        use_meta_labeling=True,
+        meta_prob_threshold=0.53,
+        meta_min_samples=40,
+        meta_retrain_interval=10,
         print_log=False,
     )
 
@@ -115,12 +120,68 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         self.pos_mgr = PositionManager(self)
         self.exit_mgr = ExitManager(self)
 
+        self.last_exit_tag = None
+        self.last_exit_price = None
+        self.meta_filter = MetaLabelingFilter(
+            prob_threshold=float(self.p.meta_prob_threshold),
+            min_samples=int(self.p.meta_min_samples),
+            retrain_interval=int(self.p.meta_retrain_interval),
+        )
+        self.meta_recorder = TradeMetaRecorder()
+
         self.rec_dates = []
         self.rec_close = []
         self.rec_equity = []
         self.rec_regime = []
         self.rec_mode_name = []
         self.trade_marks = []
+
+
+    def _build_meta_features(self, mode_id: int):
+        d = self.datas[0]
+        close = float(d.close[0])
+        atrp = float(self.atr[0]) / max(close, 1e-9)
+        vol_ratio = float(getattr(d, "vol_ratio")[0])
+        trend_score = float(getattr(d, "trend_score")[0])
+        slope = (float(self.ema20[0]) / max(float(self.ema20[-1]), 1e-9) - 1.0) if len(self) > 1 else 0.0
+        return [
+            float(mode_id),
+            atrp,
+            vol_ratio,
+            trend_score,
+            slope,
+            float(self.tranche),
+        ]
+
+    def _allow_by_meta_filter(self, mode_id: int, signal_tag: str) -> bool:
+        if not bool(self.p.use_meta_labeling):
+            return True
+
+        features = self._build_meta_features(mode_id)
+        allowed, proba = self.meta_filter.allow_signal(features)
+        if not allowed:
+            self.log(f"[META] 过滤信号 {signal_tag} | 通过概率={proba:.3f}")
+            return False
+
+        self.meta_recorder.mark_entry(features, float(self.datas[0].close[0]), signal_tag)
+        return True
+
+    def _consume_exit_for_meta(self):
+        if not bool(self.p.use_meta_labeling):
+            self.last_exit_tag = None
+            self.last_exit_price = None
+            return
+
+        if self.last_exit_tag is None or self.last_exit_price is None:
+            return
+
+        sample = self.meta_recorder.close_trade(self.last_exit_tag, float(self.last_exit_price))
+        if sample is not None:
+            feature, label = sample
+            self.meta_filter.register_sample(feature, label)
+
+        self.last_exit_tag = None
+        self.last_exit_price = None
 
     def next(self):
         d = self.datas[0]
@@ -181,10 +242,11 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
                 if profit_pct >= float(self.p.base_pyramid_profit_th):
                     if self.base_probe_counter == 0:
                         new_ratio = float(self.p.probe_ratio) * (1 + self.base_pyramid_count + 1)
-                        self.pos_mgr.scale_to(new_ratio, f"BASE金字塔加仓{self.base_pyramid_count + 1}", mode_name,
-                                              "PYRAMID")
-                        self.base_pyramid_count += 1
-                        self.base_probe_counter = self.p.base_probe_cooldown
+                        if self._allow_by_meta_filter(mode_id, "PYRAMID"):
+                            self.pos_mgr.scale_to(new_ratio, f"BASE金字塔加仓{self.base_pyramid_count + 1}", mode_name,
+                                                  "PYRAMID")
+                            self.base_pyramid_count += 1
+                            self.base_probe_counter = self.p.base_probe_cooldown
                 return
 
             if mode_name != "TREND_RUN":
@@ -214,8 +276,9 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
                 if self.pb_touched:
                     if (not self.p.rebound_confirm) or (close > ema20):
                         if getattr(d, "vol_ratio")[0] >= 1.0:
-                            self.pos_mgr.scale_to(self.p.tranche_targets[1], "第2档回踩确认", mode_name, "TRANCHE2")
-                            self.tranche = 2
+                            if self._allow_by_meta_filter(mode_id, "TRANCHE2"):
+                                self.pos_mgr.scale_to(self.p.tranche_targets[1], "第2档回踩确认", mode_name, "TRANCHE2")
+                                self.tranche = 2
                             self.pb_touched = False
                 return
 
@@ -226,8 +289,9 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
 
                 if getattr(d, "vol_ratio")[0] >= float(self.p.add_vol_ratio_min):
                     if close > float(self.hhv_add[-1]):
-                        self.pos_mgr.scale_to(self.p.tranche_targets[2], "第3档再突破", mode_name, "TRANCHE3")
-                        self.tranche = 3
+                        if self._allow_by_meta_filter(mode_id, "TRANCHE3"):
+                            self.pos_mgr.scale_to(self.p.tranche_targets[2], "第3档再突破", mode_name, "TRANCHE3")
+                            self.tranche = 3
                 return
 
             return
@@ -257,6 +321,8 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
             self.profit_taken = False
             self.base_pyramid_count = 0
             self.base_probe_counter = self.p.base_probe_cooldown
+            if not self._allow_by_meta_filter(mode_id, "PROBE"):
+                return
             self.pos_mgr.scale_to(float(self.p.probe_ratio), "BASE试探仓", mode_name, "PROBE")
             return
 
@@ -275,12 +341,15 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
             self.pb_touched = False
             self.profit_taken = False
             self.base_pyramid_count = 0
+            if not self._allow_by_meta_filter(mode_id, "TRANCHE1"):
+                return
             self.pos_mgr.scale_to(self.p.tranche_targets[0], "第1档突破首仓", mode_name, "TRANCHE1")
             return
 
     def notify_order(self, order):
         if order.status in [order.Completed, order.Canceled, order.Margin, order.Rejected]:
             if order.status == order.Completed and order.issell():
+                self._consume_exit_for_meta()
                 if self.position.size == 0:
                     self._reset_state()
             self.order = None

@@ -13,6 +13,7 @@ from .data_utils import (
 )
 from .managers import RegimeDetector, HMMRegimeDetector, PositionManager, ExitManager
 from .strategy import OptimizedHybrid4ModeV2
+from .meta_labeling import TripleBarrierConfig, TripleBarrierLabeler, ExitEventMapper, LogisticMetaModel, MetaLabelingFilter, TradeMetaRecorder
 from .backtest import plot_mode_report, run_backtest, batch_backtest, CONFIG_LOADED
 
 __all__ = [
@@ -29,6 +30,12 @@ __all__ = [
     "PositionManager",
     "ExitManager",
     "OptimizedHybrid4ModeV2",
+    "TripleBarrierConfig",
+    "TripleBarrierLabeler",
+    "ExitEventMapper",
+    "LogisticMetaModel",
+    "MetaLabelingFilter",
+    "TradeMetaRecorder",
     "plot_mode_report",
     "run_backtest",
     "batch_backtest",
