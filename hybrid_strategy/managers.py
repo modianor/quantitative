@@ -382,6 +382,10 @@ class ExitManager:
         self.p = strategy.params
         self.pos_mgr = strategy.pos_mgr
 
+    def _mark_exit(self, tag: str, price: float):
+        self.strat.last_exit_tag = str(tag)
+        self.strat.last_exit_price = float(price)
+
     def check_stop_loss(self, mode_name: str) -> bool:
         """票型差异化止损（带盘中模拟）"""
         if not self.strat.position:
@@ -416,6 +420,7 @@ class ExitManager:
             self.strat.order = self.strat.close()
             dt = self.strat.data.datetime.date(0)
             self.strat.trade_marks.append((dt, estimated_exit_price, "SELL", mode_name, "INTRADAY_STOP"))
+            self._mark_exit("INTRADAY_STOP", estimated_exit_price)
 
             # 预估卖出后状态
             cash_gain = pos_size * close  # 实际按收盘价成交
@@ -430,6 +435,7 @@ class ExitManager:
             self.strat.order = self.strat.close()
             dt = self.strat.data.datetime.date(0)
             self.strat.trade_marks.append((dt, close, "SELL", mode_name, "STOP_LOSS"))
+            self._mark_exit("STOP_LOSS", close)
 
             # 预估卖出后状态
             cash_gain = pos_size * close
@@ -448,6 +454,7 @@ class ExitManager:
         if mode_id == RegimeDetector.MODE_TOPCHOP and self.strat.tranche >= 3:
             target_ratio = self.p.tranche_targets[1]
             self.pos_mgr.scale_down_to(target_ratio, "高位横盘减仓", mode_name, "REGIME_CUT")
+            self._mark_exit("REGIME_CUT", float(self.strat.data.close[0]))
             self.strat.tranche = 2
             return True
 
@@ -471,6 +478,7 @@ class ExitManager:
                 self.strat.order = self.strat.sell(size=reduce_size)
                 dt = self.strat.data.datetime.date(0)
                 self.strat.trade_marks.append((dt, close, "SELL", mode_name, "PROFIT_TAKE"))
+                self._mark_exit("PROFIT_TAKE", close)
 
                 # 预估止盈后状态
                 remaining = pos_size - reduce_size
@@ -502,6 +510,7 @@ class ExitManager:
             self.strat.order = self.strat.close()
             dt = self.strat.data.datetime.date(0)
             self.strat.trade_marks.append((dt, close, "SELL", mode_name, "CHANDELIER"))
+            self._mark_exit("CHANDELIER", close)
 
             # 预估清仓后状态
             cash_gain = pos_size * close
