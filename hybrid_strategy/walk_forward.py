@@ -150,6 +150,8 @@ def _candidate_params(base: Dict[str, float]) -> List[Dict[str, float]]:
     stop_base = float(base.get("stop_loss_pct", 10.0))
     profit_base = float(base.get("profit_take_pct", 25.0))
     chand_base = float(base.get("chand_atr_mult", 2.8))
+    vol_ratio_base = float(base.get("vol_ratio_min", 1.2))
+    dd_base = float(base.get("dd_drawdown_th", -0.18))
 
     if stop_base >= 900:
         stop_candidates = [999.0]
@@ -158,21 +160,39 @@ def _candidate_params(base: Dict[str, float]) -> List[Dict[str, float]]:
 
     profit_candidates = [max(5.0, profit_base * k) for k in (0.9, 1.0, 1.1)]
     chand_candidates = [max(1.5, chand_base + d) for d in (-0.2, 0.0, 0.2)]
+    vol_ratio_candidates = [min(1.8, max(0.6, vol_ratio_base * k)) for k in (0.9, 1.0, 1.1)]
+    dd_candidates = [min(-0.10, max(-0.35, dd_base + d)) for d in (-0.03, 0.0, 0.03)]
 
-    candidates: List[Dict[str, float]] = []
+    candidates: List[Dict[str, float]] = [dict(base)]
     for stop in stop_candidates:
         for profit in profit_candidates:
             for chand in chand_candidates:
-                p = dict(base)
-                p.update(
-                    {
-                        "stop_loss_pct": round(stop, 2),
-                        "profit_take_pct": round(profit, 2),
-                        "chand_atr_mult": round(chand, 2),
-                    }
-                )
-                candidates.append(p)
+                for vol_ratio in vol_ratio_candidates:
+                    for dd_th in dd_candidates:
+                        p = dict(base)
+                        p.update(
+                            {
+                                "stop_loss_pct": round(stop, 2),
+                                "profit_take_pct": round(profit, 2),
+                                "chand_atr_mult": round(chand, 2),
+                                "vol_ratio_min": round(vol_ratio, 2),
+                                "dd_drawdown_th": round(dd_th, 3),
+                            }
+                        )
+                        candidates.append(p)
     return candidates
+
+
+def _score_train_metrics(metrics: Dict[str, float], min_trades: int) -> float:
+    ret = metrics["return"]
+    dd = metrics["max_dd"]
+    sharpe = metrics["sharpe"]
+    trades = metrics["trades"]
+    # 更偏向风险调整后表现，同时惩罚低交易频率以避免“几乎不交易”的最优解
+    score = ret - 0.9 * dd + 6.0 * sharpe + 0.08 * trades
+    if trades < min_trades:
+        score -= 2.0 * (min_trades - trades)
+    return score
 
 
 def walk_forward_validation(
@@ -182,6 +202,7 @@ def walk_forward_validation(
     train_years: int = 3,
     test_years: int = 1,
     target_years: Optional[List[int]] = None,
+    min_trades_train: int = 2,
 ) -> List[FoldResult]:
     if end is None:
         end = (pd.Timestamp.today().normalize() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
@@ -221,12 +242,17 @@ def walk_forward_validation(
                 except Exception:
                     continue
 
-                score = train_metrics["return"] - 0.7 * train_metrics["max_dd"] + 5.0 * train_metrics["sharpe"]
+                score = _score_train_metrics(train_metrics, min_trades=min_trades_train)
                 if score > best_score:
                     best_score = score
                     best_params = params
 
-            warmup_bars = int(best_params.get("min_bars_required", 210))
+            warmup_bars = int(
+                max(
+                    best_params.get("min_bars_required", 210),
+                    best_params.get("hmm_warmup_bars", 240),
+                )
+            )
             warmup_df = train_df.tail(warmup_bars)
             test_with_warmup = pd.concat([warmup_df, test_df], axis=0)
             test_with_warmup = test_with_warmup[~test_with_warmup.index.duplicated(keep="last")]
@@ -253,13 +279,15 @@ def walk_forward_validation(
                     "stop_loss_pct": best_params["stop_loss_pct"],
                     "profit_take_pct": best_params["profit_take_pct"],
                     "chand_atr_mult": best_params["chand_atr_mult"],
+                    "vol_ratio_min": best_params.get("vol_ratio_min"),
+                    "dd_drawdown_th": best_params.get("dd_drawdown_th"),
                 },
             )
             all_results.append(fold)
 
             print(
-                f"{fold.test_year}: OOS收益={fold.test_return:+.2f}% | "
-                f"回撤={fold.test_max_dd:.2f}% | Sharpe={fold.test_sharpe:.3f} | 交易={fold.trades}"
+                f"{fold.test_year}: OOS收益={fold.test_return:+.2f}% | 回撤={fold.test_max_dd:.2f}% | "
+                f"Sharpe={fold.test_sharpe:.3f} | 交易={fold.trades} | TrainScore={fold.train_best_score:.2f}"
             )
 
             fold_train_start = fold_train_start + pd.DateOffset(years=test_years)
@@ -280,14 +308,15 @@ def _print_summary(results: List[FoldResult], target_years: List[int]):
         avg_return=("test_return", "mean"),
         avg_dd=("test_max_dd", "mean"),
         avg_sharpe=("test_sharpe", "mean"),
+        avg_trades=("trades", "mean"),
         folds=("symbol", "count"),
     )
 
     print("\n按验证年份统计:")
     for _, row in grouped.iterrows():
         print(
-            f"{int(row['test_year'])}: 平均OOS收益={row['avg_return']:.2f}% | "
-            f"平均回撤={row['avg_dd']:.2f}% | 平均Sharpe={row['avg_sharpe']:.3f} | 样本={int(row['folds'])}"
+            f"{int(row['test_year'])}: 平均OOS收益={row['avg_return']:.2f}% | 平均回撤={row['avg_dd']:.2f}% | "
+            f"平均Sharpe={row['avg_sharpe']:.3f} | 平均交易={row['avg_trades']:.1f} | 样本={int(row['folds'])}"
         )
 
     print("\n目标年份(>=15%)检查:")
@@ -300,6 +329,15 @@ def _print_summary(results: List[FoldResult], target_years: List[int]):
         ok = "✅" if avg_ret >= 15 else "❌"
         print(f"{ok} {year}: 平均OOS收益={avg_ret:.2f}%")
 
+    print("\n按股票统计(目标年份):")
+    for symbol in sorted(df["symbol"].unique()):
+        sub = df[(df["symbol"] == symbol) & (df["test_year"].isin(target_years))]
+        if sub.empty:
+            continue
+        avg_ret = sub["test_return"].mean()
+        avg_dd = sub["test_max_dd"].mean()
+        print(f"{symbol:<6} 目标年平均收益={avg_ret:>6.2f}% | 目标年平均回撤={avg_dd:>5.2f}%")
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Walk-forward 稳健性验证")
@@ -309,6 +347,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--train-years", type=int, default=3)
     parser.add_argument("--test-years", type=int, default=1)
     parser.add_argument("--target-years", nargs="+", type=int, default=[2022, 2024])
+    parser.add_argument("--min-trades-train", type=int, default=2)
     return parser.parse_args()
 
 
@@ -321,6 +360,7 @@ def main():
         train_years=args.train_years,
         test_years=args.test_years,
         target_years=args.target_years,
+        min_trades_train=args.min_trades_train,
     )
 
 
