@@ -165,6 +165,13 @@ def run_backtest(
     # 6. 策略参数（基础参数）
     strategy_params = dict(
         max_exposure=0.60,
+        use_vol_targeting=True,
+        target_vol_annual=0.20,
+        vol_lookback=20,
+        vol_floor_annual=0.10,
+        vol_cap_annual=0.80,
+        min_vol_scalar=0.30,
+        max_vol_scalar=1.00,
         tranche_targets=(0.30, 0.60, 1.00),
         probe_ratio=0.15,
         drawdown_tolerance=0.08,
@@ -209,6 +216,8 @@ def run_backtest(
     print(f"止盈: {strategy_params['profit_take_pct']}%")
     print(f"Chandelier: {strategy_params.get('chand_atr_mult', 2.8)}")
     print(f"量能要求: {strategy_params.get('vol_ratio_min', 1.2)}x")
+    print(f"Vol Targeting: {'ON' if strategy_params.get('use_vol_targeting', True) else 'OFF'} | "
+          f"目标波动={strategy_params.get('target_vol_annual', 0.20):.2f}")
     print(f"Regime引擎: {'HMM' if strategy_params.get('use_hmm_regime', True) else 'RULE'}")
     print(f"{'=' * 60}\n")
 
