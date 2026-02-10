@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import argparse
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -164,35 +164,46 @@ def _candidate_params(base: Dict[str, float]) -> List[Dict[str, float]]:
     dd_candidates = [min(-0.10, max(-0.35, dd_base + d)) for d in (-0.03, 0.0, 0.03)]
 
     candidates: List[Dict[str, float]] = [dict(base)]
+    seen: set[Tuple[float, float, float, float, float]] = set()
+
     for stop in stop_candidates:
         for profit in profit_candidates:
             for chand in chand_candidates:
                 for vol_ratio in vol_ratio_candidates:
                     for dd_th in dd_candidates:
+                        key = (round(stop, 2), round(profit, 2), round(chand, 2), round(vol_ratio, 2), round(dd_th, 3))
+                        if key in seen:
+                            continue
+                        seen.add(key)
                         p = dict(base)
                         p.update(
                             {
-                                "stop_loss_pct": round(stop, 2),
-                                "profit_take_pct": round(profit, 2),
-                                "chand_atr_mult": round(chand, 2),
-                                "vol_ratio_min": round(vol_ratio, 2),
-                                "dd_drawdown_th": round(dd_th, 3),
+                                "stop_loss_pct": key[0],
+                                "profit_take_pct": key[1],
+                                "chand_atr_mult": key[2],
+                                "vol_ratio_min": key[3],
+                                "dd_drawdown_th": key[4],
                             }
                         )
                         candidates.append(p)
     return candidates
 
 
-def _score_train_metrics(metrics: Dict[str, float], min_trades: int) -> float:
+def _score_metrics(metrics: Dict[str, float], min_trades: int) -> float:
     ret = metrics["return"]
     dd = metrics["max_dd"]
     sharpe = metrics["sharpe"]
     trades = metrics["trades"]
-    # 更偏向风险调整后表现，同时惩罚低交易频率以避免“几乎不交易”的最优解
-    score = ret - 0.9 * dd + 6.0 * sharpe + 0.08 * trades
+    score = ret - 1.0 * dd + 6.0 * sharpe + 0.12 * trades
     if trades < min_trades:
-        score -= 2.0 * (min_trades - trades)
+        score -= 3.0 * (min_trades - trades)
     return score
+
+
+def _build_eval_slice(history_df: pd.DataFrame, eval_df: pd.DataFrame, warmup_bars: int) -> pd.DataFrame:
+    warmup_df = history_df.tail(warmup_bars)
+    merged = pd.concat([warmup_df, eval_df], axis=0)
+    return merged[~merged.index.duplicated(keep="last")]
 
 
 def walk_forward_validation(
@@ -203,6 +214,8 @@ def walk_forward_validation(
     test_years: int = 1,
     target_years: Optional[List[int]] = None,
     min_trades_train: int = 2,
+    val_months: int = 6,
+    top_k_train: int = 8,
 ) -> List[FoldResult]:
     if end is None:
         end = (pd.Timestamp.today().normalize() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
@@ -234,28 +247,45 @@ def walk_forward_validation(
                 fold_train_start = fold_train_start + pd.DateOffset(years=test_years)
                 continue
 
-            best_score = -1e9
-            best_params = dict(base_params)
+            val_start = max(train_df.index.min(), fold_train_end - pd.DateOffset(months=val_months) + pd.Timedelta(days=1))
+            train_core_df = train_df.loc[train_df.index < val_start].copy()
+            val_df = train_df.loc[train_df.index >= val_start].copy()
+
+            if len(train_core_df) < 210 or len(val_df) < 80:
+                train_core_df = train_df
+                val_df = train_df.tail(min(126, len(train_df))).copy()
+
+            ranked_train: List[Tuple[float, Dict[str, float]]] = []
             for params in _candidate_params(base_params):
                 try:
-                    train_metrics = _run_slice_backtest(train_df, params)
+                    train_metrics = _run_slice_backtest(train_core_df, params)
+                except Exception:
+                    continue
+                train_score = _score_metrics(train_metrics, min_trades=min_trades_train)
+                ranked_train.append((train_score, params))
+
+            ranked_train.sort(key=lambda x: x[0], reverse=True)
+            shortlist = ranked_train[: max(1, top_k_train)]
+
+            best_score = -1e9
+            best_params = dict(base_params)
+
+            for train_score, params in shortlist:
+                warmup_bars = int(max(params.get("min_bars_required", 210), params.get("hmm_warmup_bars", 240)))
+                val_with_warmup = _build_eval_slice(train_core_df, val_df, warmup_bars)
+                try:
+                    val_metrics = _run_slice_backtest(val_with_warmup, params, trade_start_date=val_df.index.min())
                 except Exception:
                     continue
 
-                score = _score_train_metrics(train_metrics, min_trades=min_trades_train)
-                if score > best_score:
-                    best_score = score
+                val_score = _score_metrics(val_metrics, min_trades=max(1, min_trades_train - 1))
+                combined_score = 0.55 * train_score + 0.45 * val_score
+                if combined_score > best_score:
+                    best_score = combined_score
                     best_params = params
 
-            warmup_bars = int(
-                max(
-                    best_params.get("min_bars_required", 210),
-                    best_params.get("hmm_warmup_bars", 240),
-                )
-            )
-            warmup_df = train_df.tail(warmup_bars)
-            test_with_warmup = pd.concat([warmup_df, test_df], axis=0)
-            test_with_warmup = test_with_warmup[~test_with_warmup.index.duplicated(keep="last")]
+            warmup_bars = int(max(best_params.get("min_bars_required", 210), best_params.get("hmm_warmup_bars", 240)))
+            test_with_warmup = _build_eval_slice(train_df, test_df, warmup_bars)
 
             test_metrics = _run_slice_backtest(
                 test_with_warmup,
@@ -348,6 +378,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--test-years", type=int, default=1)
     parser.add_argument("--target-years", nargs="+", type=int, default=[2022, 2024])
     parser.add_argument("--min-trades-train", type=int, default=2)
+    parser.add_argument("--val-months", type=int, default=6)
+    parser.add_argument("--top-k-train", type=int, default=8)
     return parser.parse_args()
 
 
@@ -361,6 +393,8 @@ def main():
         test_years=args.test_years,
         target_years=args.target_years,
         min_trades_train=args.min_trades_train,
+        val_months=args.val_months,
+        top_k_train=args.top_k_train,
     )
 
 
