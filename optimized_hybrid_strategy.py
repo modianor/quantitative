@@ -19,11 +19,27 @@ class PandasWithSignals(bt.feeds.PandasData):
 def load_from_yfinance(symbol: str, start=None, end=None, period="5y"):
     import yfinance as yf
 
-    raw = yf.download(symbol, start=start, end=end, period=None if (start or end) else period, interval="1d", auto_adjust=False)
+    if start or end:
+        raw = yf.download(symbol, start=start, end=end, interval="1d", auto_adjust=False)
+    else:
+        raw = yf.download(symbol, period=period, interval="1d", auto_adjust=False)
+
+    if raw is None or len(raw) == 0:
+        raise ValueError(f"yfinance 未返回有效数据: {symbol}")
+
     if isinstance(raw.columns, pd.MultiIndex):
         raw.columns = raw.columns.get_level_values(0)
     raw.columns = [str(c).strip().title() for c in raw.columns]
-    return raw[["Open", "High", "Low", "Close", "Volume"]].dropna().rename_axis("Date")
+
+    required = ["Open", "High", "Low", "Close", "Volume"]
+    miss = [c for c in required if c not in raw.columns]
+    if miss:
+        raise ValueError(f"yfinance 数据缺列 {miss}: {symbol}")
+
+    out = raw[required].dropna().rename_axis("Date")
+    if out.empty:
+        raise ValueError(f"yfinance 数据清洗后为空: {symbol}")
+    return out
 
 
 def load_from_csv(csv_path: str):
@@ -347,11 +363,26 @@ def run_backtest(symbol="NVDA", use_yfinance=True, csv_path=None, cash=100000, c
     if custom_params:
         params.update(custom_params)
 
-    df = load_from_yfinance(symbol, start="2020-01-01", end="2026-02-11") if use_yfinance else load_from_csv(csv_path)
+    if use_yfinance:
+        df = load_from_yfinance(symbol, start="2020-01-01", end="2026-02-11")
+    else:
+        if not csv_path:
+            raise ValueError("use_yfinance=False 时必须提供 csv_path")
+        df = load_from_csv(csv_path)
+    min_required_rows = max(240, int(params.get("min_bars_required", 210)) + 30)
+    if len(df) < min_required_rows:
+        raise ValueError(
+            f"{symbol} 历史数据不足，当前{len(df)}行，至少需要{min_required_rows}行，"
+            "请检查下载区间或数据源。"
+        )
+
     df2 = detect_main_uptrend(df)
     for col, src in [("is_main_uptrend", "is_main_uptrend"), ("main_uptrend_start", "main_uptrend_start"), ("trend_score", "TrendScore"), ("mom_score", "MomScore"), ("pb_score", "PbScore")]:
         df2[col] = df2[src].fillna(0).astype(int)
     df2["vol_ratio"] = df2["VOL_RATIO"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    if len(df2) < min_required_rows:
+        raise ValueError(f"{symbol} 信号计算后数据不足: {len(df2)}")
 
     cerebro = bt.Cerebro(); cerebro.adddata(PandasWithSignals(dataname=df2))
     cerebro.broker.setcash(cash); cerebro.broker.setcommission(commission=commission)
