@@ -3,7 +3,7 @@
 
 import backtrader as bt
 
-from .managers import RegimeDetector, PositionManager, ExitManager
+from .managers import RegimeDetector, HMMRegimeDetector, PositionManager, ExitManager
 
 class OptimizedHybrid4ModeV2(bt.Strategy):
     params = dict(
@@ -41,6 +41,10 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         cooldown_bars=3,
         require_main_uptrend=True,
         allow_entry_in_top_chop=False,
+        use_hmm_regime=True,
+        hmm_warmup_bars=240,
+        hmm_min_confidence=0.45,
+        hmm_mode_buffer_days=2,
         print_log=False,
     )
 
@@ -71,18 +75,22 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
                     print(f"   💰 现金: ${cash:,.0f} | 总资产: ${value:,.0f}")
 
     def __init__(self):
+        if not self.datas or self.datas[0] is None:
+            raise ValueError("策略初始化失败: 未检测到有效数据源")
+
         d = self.datas[0]
 
-        self.atr = bt.ind.ATR(d, period=self.p.atr_period)
-        self.ema20 = bt.ind.EMA(d.close, period=20)
-        self.ema50 = bt.ind.EMA(d.close, period=50)
-        self.ema200 = bt.ind.EMA(d.close, period=200)
+        # 显式绑定_owner，避免在部分backtrader环境中owner推断失败(NoneType.addindicator)
+        self.atr = bt.ind.ATR(d, period=self.p.atr_period, _owner=self)
+        self.ema20 = bt.ind.EMA(d.close, period=20, _owner=self)
+        self.ema50 = bt.ind.EMA(d.close, period=50, _owner=self)
+        self.ema200 = bt.ind.EMA(d.close, period=200, _owner=self)
 
-        self.hh_chand = bt.ind.Highest(d.high, period=self.p.chand_period)
-        self.hhv_entry = bt.ind.Highest(d.close, period=self.p.breakout_n)
-        self.hhv_add = bt.ind.Highest(d.close, period=self.p.add_breakout_n)
-        self.hh_stage = bt.ind.Highest(d.close, period=self.p.stage_lookback)
-        self.ll_base = bt.ind.Lowest(d.low, period=self.p.base_hl_win)
+        self.hh_chand = bt.ind.Highest(d.high, period=self.p.chand_period, _owner=self)
+        self.hhv_entry = bt.ind.Highest(d.close, period=self.p.breakout_n, _owner=self)
+        self.hhv_add = bt.ind.Highest(d.close, period=self.p.add_breakout_n, _owner=self)
+        self.hh_stage = bt.ind.Highest(d.close, period=self.p.stage_lookback, _owner=self)
+        self.ll_base = bt.ind.Lowest(d.low, period=self.p.base_hl_win, _owner=self)
 
         self.order = None
         self.cooldown = 0
@@ -92,7 +100,8 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         self.base_probe_counter = 0
         self.base_pyramid_count = 0
 
-        self.regime = RegimeDetector(self)
+        self.rule_regime = RegimeDetector(self)
+        self.regime = HMMRegimeDetector(self, fallback_detector=self.rule_regime) if self.p.use_hmm_regime else self.rule_regime
         self.pos_mgr = PositionManager(self)
         self.exit_mgr = ExitManager(self)
 
@@ -271,4 +280,3 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         self.pb_touched = False
         self.profit_taken = False
         self.base_pyramid_count = 0
-
