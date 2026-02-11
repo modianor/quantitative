@@ -113,6 +113,16 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         burst_disable_intraday_chand=True,
         # 趋势保护期内是否禁用保本止损
         burst_disable_break_even=True,
+        # 高波动票风控自适应：降低盘中噪声触发误伤
+        high_vol_relax_enabled=True,
+        high_vol_intraday_stop_enabled=False,
+        high_vol_stop_confirm_bars=2,
+        high_vol_stop_loss_widen_pct=1.2,
+        high_vol_intraday_stop_buffer_pct=0.6,
+        high_vol_disable_intraday_chand=True,
+        high_vol_chand_mult_bonus=0.30,
+        high_vol_fast_exit_dd_bonus=1.5,
+        high_vol_fast_chand_floor_bonus=0.25,
         # 震荡/波段单独参数：见好就收 + 更紧止损
         swing_stop_loss_pct=6.0,
         swing_profit_take_pct=10.0,
@@ -359,6 +369,8 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         self.last_exit_tag = None
         self.last_exit_price = None
         self.last_exit_reason = None
+        self.stop_intraday_breach_count = 0
+        self.stop_close_breach_count = 0
         self.meta_wait_count = 0
         self.engine_by_mode = {
             "TREND_RUN": "TREND_ENGINE",
@@ -431,6 +443,27 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
 
         trend_prob = getattr(self.regime, "get_trend_probability", lambda: 1.0)()
         return float(trend_prob) >= threshold
+
+    def is_high_vol_stock(self) -> bool:
+        """根据票型学习器识别高波动股票。"""
+        if not bool(getattr(self.p, "high_vol_relax_enabled", True)):
+            return False
+
+        learner = getattr(self, "profile_learner", None)
+        if learner is None:
+            return False
+
+        annual_vol = float(getattr(learner, "metrics", {}).get("annual_vol", 0.0))
+        vol_th = float(getattr(self.p, "adaptive_high_vol_threshold", 0.45))
+        archetype = str(getattr(learner, "archetype", "UNKNOWN"))
+        conf = float(getattr(learner, "confidence", 0.0))
+        conf_min = float(getattr(self.p, "adaptive_confidence_min", 0.30))
+
+        if annual_vol >= vol_th:
+            return True
+        if conf >= conf_min and archetype in {"HIGH_BETA_GROWTH", "CYCLICAL"}:
+            return True
+        return False
 
     def _r_multiple_scaled_ratio(self, base_ratio: float, mode_name: str) -> float:
         if not bool(getattr(self.p, "use_r_multiple_pyramiding", True)) or not self.position:
