@@ -78,6 +78,9 @@ python optimized_hybrid_strategy.py
 | `stop_loss_pct` | `strategy.py` / `stock_configs.py` | 止损阈值（%）；`>=999` 表示禁用止损（高波动票） | `<1` 在WF候选中会被抬到 `1`; `>=999` 视为禁用 | `5~12`（常规票）；高波动票可用 `999` |
 | `profit_take_pct` | `strategy.py` / `stock_configs.py` | 三档后触发分批止盈阈值（%） | WF最低 `5` | `15~40` |
 | `chand_atr_mult` | `strategy.py` / `stock_configs.py` | Chandelier 退出ATR倍数 | WF最低 `1.5` | `2.2~3.2` |
+| `fast_exit_drawdown_pct` | `strategy.py` | 持仓从峰值回撤超过该阈值后，启用更紧的快速Chandelier（%） | 无显式clamp | `4~8` |
+| `fast_chand_atr_mult` | `strategy.py` | 快速Chandelier ATR倍数（通常小于 `chand_atr_mult`） | 无显式clamp | `1.4~2.2` |
+| `chand_use_intraday_low` | `strategy.py` | 用当日最低价近似5分钟触发Chandelier（减少收盘滞后） | 布尔 | `True` 优先 |
 | `vol_ratio_min` | `strategy.py` / `stock_configs.py` | 首次突破入场最低量能比（`Volume/VOL_MA20`） | WF clamp 到 `[0.6,1.8]` | `0.9~1.4` |
 | `add_vol_ratio_min` | `strategy.py` | 第三档加仓量能门槛 | 无显式clamp | `0.9~1.3` |
 | `dd_drawdown_th` | `strategy.py` / `stock_configs.py` | 判定 DRAWDOWN 的回撤阈值（负数） | WF clamp 到 `[-0.35,-0.10]` | `-0.24~-0.14` |
