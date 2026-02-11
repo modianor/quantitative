@@ -94,6 +94,30 @@ python optimized_hybrid_strategy.py
 | `drawdown_tolerance` | `strategy.py` | 加仓前容忍回撤（相对成本） | 无显式clamp | `0.05~0.12` |
 | `cooldown_bars` | `strategy.py` | 止损/退出后冷却bar数 | 无显式clamp | `1~5` |
 
+### 4.1 交易次数敏感参数（已标记）
+
+> 下面这组参数对“交易次数（开仓+加仓+减仓+平仓）”最敏感，建议优先调试。
+>
+> - **高影响**：通常会直接改变信号是否触发，或改变退出频率。
+> - **中影响**：主要通过仓位/过滤机制间接影响成交发生概率。
+
+| 参数 | 影响等级 | 影响方向（调大时） | 原因 |
+|---|---|---|---|
+| `vol_ratio_min` | 高 | 通常减少交易次数 | 入场量能门槛更高，首次突破更难触发 |
+| `add_vol_ratio_min` | 高 | 通常减少交易次数 | 第三档加仓条件更严格，加仓笔数减少 |
+| `cooldown_bars` | 高 | 减少交易次数 | 每次退出后更长时间禁止再入场 |
+| `stop_loss_pct` | 高 | 通常减少止损触发、可能降低换手 | 止损更宽，短期内被洗出的概率下降 |
+| `profit_take_pct` | 高 | 通常减少止盈触发、延长持仓 | 分批止盈门槛变高，卖出事件变少 |
+| `chand_atr_mult` | 高 | 通常减少 Chandelier 卖出 | 追踪止损更宽，平仓触发更慢 |
+| `dd_drawdown_th` | 高 | 双向影响（取决于市场） | 更容易/更难进入 DRAWDOWN，会改变“禁止加仓/入场”的时间占比 |
+| `cross_top_min` | 中 | 通常减少交易次数 | TOP_CHOP 判定更严格，模式切换频率变化 |
+| `base_probe_cooldown` | 中 | 减少交易次数 | BASE 试探/金字塔加仓之间的最小间隔变长 |
+| `base_pyramid_profit_th` | 中 | 通常减少交易次数 | BASE 金字塔加仓需要更高浮盈 |
+| `use_hmm_regime` / `hmm_min_confidence` / `hmm_mode_buffer_days` | 中 | 双向影响 | 改变模式识别稳定性与切换频率，间接改变信号触发 |
+| `use_meta_labeling` / `meta_prob_threshold` | 高 | 通常减少交易次数 | 过滤更多入场/加仓信号 |
+
+> 实操建议：如果你目标是“降低交易次数”，优先提高 `vol_ratio_min`、`add_vol_ratio_min`、`cooldown_bars`、`meta_prob_threshold`；如果你目标是“提高交易次数”，反向微调并配合 Walk-forward 验证。
+
 ---
 
 ## 5. 风险预算与仓位参数（Vol Targeting）
