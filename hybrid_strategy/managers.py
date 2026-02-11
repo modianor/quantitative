@@ -398,13 +398,20 @@ class ExitManager:
         self.strat.last_exit_price = float(price)
         self.strat.last_exit_reason = str(reason)
 
+    def _is_swing_profile(self) -> bool:
+        profile = str(getattr(self.strat, "entry_profile", "NEUTRAL"))
+        bias = str(getattr(self.strat, "current_market_bias", "NEUTRAL"))
+        return profile == "SWING_CHOP" or bias == "SWING_CHOP"
+
     def check_stop_loss(self, mode_name: str) -> bool:
         """票型差异化止损（带盘中模拟）"""
         if not self.strat.position:
             return False
 
+        active_stop_loss = float(self.p.swing_stop_loss_pct) if self._is_swing_profile() else float(self.p.stop_loss_pct)
+
         # 高波动票：禁用止损（stop_loss_pct >= 999）
-        if self.p.stop_loss_pct >= 999:
+        if active_stop_loss >= 999:
             return False
 
         close = float(self.strat.data.close[0])
@@ -421,10 +428,10 @@ class ExitManager:
         pnl_intraday_low = (low_today / cost - 1.0) * 100
 
         # 如果盘中最低点触发止损
-        if pnl_intraday_low <= -float(self.p.stop_loss_pct):
+        if pnl_intraday_low <= -active_stop_loss:
             participation = min(max(pos_size / max(float(self.strat.broker.getvalue()), 1.0), 0.001), 0.25)
             ann_vol = self.pos_mgr._annualized_volatility()
-            stop_price = cost * (1 - float(self.p.stop_loss_pct) / 100)
+            stop_price = cost * (1 - active_stop_loss / 100)
             estimated_exit_price = self.slippage_model.apply_to_price(
                 stop_price,
                 side="SELL",
@@ -448,8 +455,8 @@ class ExitManager:
             return True
 
         # 正常收盘止损
-        elif pnl_close <= -float(self.p.stop_loss_pct):
-            self.strat.log(f"[{mode_name}] 收盘止损触发 PnL={pnl_close:.2f}% 阈值=-{self.p.stop_loss_pct:.2f}%")
+        elif pnl_close <= -active_stop_loss:
+            self.strat.log(f"[{mode_name}] 收盘止损触发 PnL={pnl_close:.2f}% 阈值=-{active_stop_loss:.2f}%")
             self.strat.order = self.strat.close()
             dt = self.strat.data.datetime.date(0)
             self.strat.trade_marks.append((dt, close, "SELL", mode_name, "STOP_LOSS"))
@@ -515,36 +522,51 @@ class ExitManager:
         return False
 
     def check_profit_taking(self, mode_name: str) -> bool:
-        """分批止盈"""
-        if not self.strat.position or self.strat.tranche < 3:
+        """分批止盈；震荡/波段环境更倾向于尽快落袋。"""
+        if not self.strat.position:
             return False
 
         close = float(self.strat.data.close[0])
         cost = float(self.strat.position.price)
         pnl_pct = (close / cost - 1.0) * 100
+        pos_size = int(self.strat.position.size)
 
-        if pnl_pct >= float(self.p.profit_take_pct) and not self.strat.profit_taken:
-            pos_size = int(self.strat.position.size)
-            reduce_size = int(pos_size // 3)
+        is_swing = self._is_swing_profile()
+        target_pct = float(self.p.swing_profit_take_pct) if is_swing else float(self.p.profit_take_pct)
 
-            if reduce_size > 0:
-                self.strat.log(f"[{mode_name}] 分批止盈 PnL={pnl_pct:.2f}% | 减仓={reduce_size}")
-                self.strat.order = self.strat.sell(size=reduce_size)
-                dt = self.strat.data.datetime.date(0)
-                self.strat.trade_marks.append((dt, close, "SELL", mode_name, "PROFIT_TAKE"))
-                self._mark_exit("PROFIT_TAKE", close, reason="TREND_FAIL")
+        if pnl_pct < target_pct:
+            return False
 
-                # 预估止盈后状态
-                remaining = pos_size - reduce_size
-                remaining_value = remaining * close
-                cash_gain = reduce_size * close
+        if is_swing:
+            reduce_size = max(int(pos_size * 0.5), 1)
+            tag = "SWING_PROFIT"
+            reason = "震荡/波段见好就收"
+        else:
+            if self.strat.tranche < 3 or self.strat.profit_taken:
+                return False
+            reduce_size = max(int(pos_size // 3), 1)
+            tag = "PROFIT_TAKE"
+            reason = "分批止盈"
 
-                self.strat.log(f"   → 预估持仓: {remaining}股 @ ${cost:.2f} | 市值约${remaining_value:,.0f}")
-                self.strat.log(f"   → 预估现金: ${self.strat.broker.cash + cash_gain:,.0f}")
+        self.strat.log(f"[{mode_name}] {reason} PnL={pnl_pct:.2f}% | 减仓={reduce_size}")
+        self.strat.order = self.strat.sell(size=reduce_size)
+        dt = self.strat.data.datetime.date(0)
+        self.strat.trade_marks.append((dt, close, "SELL", mode_name, tag))
+        self._mark_exit(tag, close, reason="TREND_FAIL")
 
-                self.strat.profit_taken = True
-                return True
-        return False
+        remaining = pos_size - reduce_size
+        remaining_value = remaining * close
+        cash_gain = reduce_size * close
+
+        if remaining > 0:
+            self.strat.log(f"   → 预估持仓: {remaining}股 @ ${cost:.2f} | 市值约${remaining_value:,.0f}")
+        else:
+            self.strat.log("   → 预估持仓: 空仓")
+        self.strat.log(f"   → 预估现金: ${self.strat.broker.cash + cash_gain:,.0f}")
+
+        if not is_swing:
+            self.strat.profit_taken = True
+        return True
 
     def check_chandelier(self, mode_name: str) -> bool:
         """Chandelier Exit"""
@@ -560,7 +582,7 @@ class ExitManager:
         hh_chand = float(self.strat.hh_chand[0])
 
         # 先用常规Chandelier，若从持仓峰值回撤超阈值，则切到更紧的ATR倍数
-        active_mult = float(self.p.chand_atr_mult)
+        active_mult = float(self.p.swing_chand_atr_mult) if self._is_swing_profile() else float(self.p.chand_atr_mult)
         peak = max(float(getattr(self.strat, "entry_peak_price", close)), close)
         self.strat.entry_peak_price = peak
         peak_drawdown_pct = (close / max(peak, 1e-9) - 1.0) * 100.0
