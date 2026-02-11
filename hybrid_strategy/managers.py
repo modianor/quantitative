@@ -556,15 +556,39 @@ class ExitManager:
         pos_size = int(self.strat.position.size)
         pnl = (close / cost - 1.0) * 100
 
-        chand_line = float(self.strat.hh_chand[0]) - float(self.p.chand_atr_mult) * float(self.strat.atr[0])
+        atrv = float(self.strat.atr[0])
+        hh_chand = float(self.strat.hh_chand[0])
 
-        if close < chand_line:
-            self.strat.log(f"[{mode_name}] Chandelier Exit | Close=${close:.2f} < ${chand_line:.2f} | "
-                           f"持仓盈亏{pnl:+.2f}%")
+        # 先用常规Chandelier，若从持仓峰值回撤超阈值，则切到更紧的ATR倍数
+        active_mult = float(self.p.chand_atr_mult)
+        peak = max(float(getattr(self.strat, "entry_peak_price", close)), close)
+        self.strat.entry_peak_price = peak
+        peak_drawdown_pct = (close / max(peak, 1e-9) - 1.0) * 100.0
+        fast_dd_threshold = float(getattr(self.p, "fast_exit_drawdown_pct", 5.0))
+        if peak_drawdown_pct <= -fast_dd_threshold:
+            active_mult = min(active_mult, float(getattr(self.p, "fast_chand_atr_mult", 1.9)))
+
+        chand_line = hh_chand - active_mult * atrv
+
+        trigger_price = close
+        trigger_tag = "CHANDELIER"
+        trigger_desc = f"Close=${close:.2f}"
+
+        # 日线回测中用当日最低价近似5分钟风控触发，减少“日内破位但收盘拉回”导致的迟钝。
+        if bool(getattr(self.p, "chand_use_intraday_low", True)):
+            low_today = float(self.strat.data.low[0])
+            if low_today < chand_line:
+                trigger_price = low_today
+                trigger_tag = "CHANDELIER_INTRADAY"
+                trigger_desc = f"Low=${low_today:.2f}"
+
+        if trigger_price < chand_line:
+            self.strat.log(f"[{mode_name}] Chandelier Exit | {trigger_desc} < ${chand_line:.2f} | "
+                           f"mult={active_mult:.2f} | 峰值回撤{peak_drawdown_pct:.2f}% | 持仓盈亏{pnl:+.2f}%")
             self.strat.order = self.strat.close()
             dt = self.strat.data.datetime.date(0)
-            self.strat.trade_marks.append((dt, close, "SELL", mode_name, "CHANDELIER"))
-            self._mark_exit("CHANDELIER", close, reason="TREND_FAIL")
+            self.strat.trade_marks.append((dt, trigger_price, "SELL", mode_name, trigger_tag))
+            self._mark_exit(trigger_tag, trigger_price, reason="TREND_FAIL")
 
             # 预估清仓后状态
             cash_gain = pos_size * close

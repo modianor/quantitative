@@ -71,6 +71,12 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         chand_period=22,
         # Chandelier ATR 倍数（越大越“宽松”）
         chand_atr_mult=2.8,
+        # 回撤恶化后启用“快速Chandelier”的阈值（相对入场后峰值，百分比）
+        fast_exit_drawdown_pct=5.0,
+        # 快速Chandelier ATR倍数（通常小于 chand_atr_mult）
+        fast_chand_atr_mult=1.9,
+        # 是否允许使用当日最低价触发 Chandelier（模拟日内风控）
+        chand_use_intraday_low=True,
         # ATR 指标周期
         atr_period=14,
         # 硬止损阈值（百分比），例如 8.0 表示 -8% 止损
