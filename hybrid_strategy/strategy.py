@@ -35,6 +35,8 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         min_vol_scalar=0.30,
         # 波动率缩放因子最大值（最高仓位系数）
         max_vol_scalar=1.00,
+        # Realized volatility估计方法："close" 或 "parkinson"
+        realized_vol_method="close",
         # TREND_RUN 模式下三段加仓目标（占 max_exposure 的比例）
         tranche_targets=(0.30, 0.60, 1.00),
         # BASE_BUILD 探针仓位比例（用于试错小仓位）
@@ -119,6 +121,10 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         hmm_min_confidence=0.45,
         # HMM 状态切换缓冲天数（防抖）
         hmm_mode_buffer_days=2,
+        # 是否按市场后验动态更新HMM转移概率
+        hmm_dynamic_transition=True,
+        # 动态转移矩阵更新速度
+        hmm_transition_lr=0.03,
 
         # ===== 7) Meta Labeling 参数 =====
         # 是否启用元标签过滤器（过滤低质量入场信号）
@@ -129,6 +135,8 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         meta_min_samples=40,
         # 模型重训练间隔（每 N 笔样本）
         meta_retrain_interval=10,
+        # 启用跨资产相对强弱特征（若数据中有benchmark_close）
+        use_cross_asset_meta=True,
 
         # ===== 8) 其他 =====
         # 是否打印详细日志
@@ -221,6 +229,14 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         vol_ratio = float(getattr(d, "vol_ratio")[0])
         trend_score = float(getattr(d, "trend_score")[0])
         slope = (float(self.ema20[0]) / max(float(self.ema20[-1]), 1e-9) - 1.0) if len(self) > 1 else 0.0
+        relative_strength = 0.0
+        if bool(getattr(self.p, "use_cross_asset_meta", True)) and hasattr(d, "benchmark_close") and len(self) > 1:
+            b0 = float(getattr(d, "benchmark_close")[0])
+            b1 = float(getattr(d, "benchmark_close")[-1])
+            if b0 > 0 and b1 > 0:
+                asset_ret = close / max(float(d.close[-1]), 1e-9) - 1.0
+                bench_ret = b0 / b1 - 1.0
+                relative_strength = asset_ret - bench_ret
         return [
             float(mode_id),
             atrp,
@@ -228,6 +244,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
             trend_score,
             slope,
             float(self.tranche),
+            relative_strength,
         ]
 
     def _allow_by_meta_filter(self, mode_id: int, signal_tag: str) -> bool:

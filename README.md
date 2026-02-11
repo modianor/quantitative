@@ -6,6 +6,8 @@
 - 分档建仓 + 差异化出场（止损 / 分批止盈 / Chandelier）
 - 按股票独立参数配置（`stock_configs.py`）
 - 可选 HMM 状态识别与 Meta-labeling 信号过滤
+- Almgren-Chriss 滑点成本估计 + Realized Volatility 风险刻画
+- Deflated Sharpe Ratio 过拟合修正 + Risk Parity 批量权重建议
 - 支持单标的回测、批量回测、Walk-forward 验证
 
 ---

@@ -3,6 +3,12 @@
 
 import math
 
+from .advanced_models import (
+    AlmgrenChrissSlippageModel,
+    RealizedVolatilityEstimator,
+    TransitionAdaptiveHMMMixin,
+)
+
 class RegimeDetector:
     MODE_TREND = 0
     MODE_TOPCHOP = 1
@@ -117,7 +123,7 @@ class RegimeDetector:
         return True
 
 
-class HMMRegimeDetector:
+class HMMRegimeDetector(TransitionAdaptiveHMMMixin):
     """基于4状态高斯隐马尔可夫的状态识别器。"""
 
     MODE_TREND = RegimeDetector.MODE_TREND
@@ -156,6 +162,8 @@ class HMMRegimeDetector:
             [0.10, 0.030, 0.20, 0.0018],
             [0.08, 0.020, 0.16, 0.0015],
         ]
+        self.use_dynamic_transition = bool(getattr(self.p, "hmm_dynamic_transition", True))
+        self.transition_learning_rate = float(getattr(self.p, "hmm_transition_lr", 0.03))
 
     def get_mode(self):
         min_bars = int(max(self.p.min_bars_required, getattr(self.p, "hmm_warmup_bars", 240)))
@@ -226,6 +234,8 @@ class HMMRegimeDetector:
             return pred
 
         self.posterior = [v / denom for v in unnorm]
+        if self.use_dynamic_transition:
+            self.adapt_transition(self.posterior, self.transition_learning_rate)
         return self.posterior
 
     def _gaussian_emissions(self, x_t):
@@ -266,6 +276,11 @@ class PositionManager:
     def __init__(self, strategy):
         self.strat = strategy
         self.p = strategy.params
+        rv_method = str(getattr(self.p, "realized_vol_method", "close"))
+        self.rv_estimator = RealizedVolatilityEstimator(
+            lookback=int(max(getattr(self.p, "vol_lookback", 20), 2)),
+            method=rv_method,
+        )
 
     def target_size(self, ratio: float) -> int:
         price = float(self.strat.data.close[0])
@@ -295,21 +310,16 @@ class PositionManager:
     def _annualized_volatility(self) -> float:
         lookback = int(max(getattr(self.p, "vol_lookback", 20), 2))
 
-        rets = []
-        max_hist = min(len(self.strat.data.close) - 1, lookback)
-        for i in range(1, max_hist + 1):
-            c0 = float(self.strat.data.close[-i])
-            c1 = float(self.strat.data.close[-i - 1])
-            if c0 > 0 and c1 > 0:
-                rets.append(math.log(c0 / c1))
+        max_hist = min(len(self.strat.data.close), lookback + 1)
+        close_hist = [float(self.strat.data.close[-i]) for i in range(max_hist - 1, -1, -1)]
+        high_hist = [float(self.strat.data.high[-i]) for i in range(max_hist - 1, -1, -1)]
+        low_hist = [float(self.strat.data.low[-i]) for i in range(max_hist - 1, -1, -1)]
 
-        if len(rets) < 2:
+        annual_vol = self.rv_estimator.estimate_from_series(close_hist, high_hist, low_hist)
+
+        if annual_vol <= 1e-8:
             atrp = float(self.strat.atr[0]) / max(float(self.strat.data.close[0]), 1e-9)
             annual_vol = atrp * math.sqrt(252.0)
-        else:
-            mean_ret = sum(rets) / float(len(rets))
-            variance = sum((r - mean_ret) ** 2 for r in rets) / float(len(rets) - 1)
-            annual_vol = math.sqrt(max(variance, 0.0)) * math.sqrt(252.0)
 
         floor_vol = float(getattr(self.p, "vol_floor_annual", 0.10))
         cap_vol = float(getattr(self.p, "vol_cap_annual", 0.80))
@@ -381,6 +391,7 @@ class ExitManager:
         self.strat = strategy
         self.p = strategy.params
         self.pos_mgr = strategy.pos_mgr
+        self.slippage_model = AlmgrenChrissSlippageModel()
 
     def _mark_exit(self, tag: str, price: float):
         self.strat.last_exit_tag = str(tag)
@@ -410,12 +421,18 @@ class ExitManager:
 
         # 如果盘中最低点触发止损
         if pnl_intraday_low <= -float(self.p.stop_loss_pct):
-            # 假设在盘中触发时立即止损，使用止损价附近的价格
-            # 估算：止损价 + 0.5%滑点
-            estimated_exit_price = cost * (1 - float(self.p.stop_loss_pct) / 100) * 0.995
+            participation = min(max(pos_size / max(float(self.strat.broker.getvalue()), 1.0), 0.001), 0.25)
+            ann_vol = self.pos_mgr._annualized_volatility()
+            stop_price = cost * (1 - float(self.p.stop_loss_pct) / 100)
+            estimated_exit_price = self.slippage_model.apply_to_price(
+                stop_price,
+                side="SELL",
+                participation_rate=participation,
+                annual_vol=ann_vol,
+            )
 
             self.strat.log(f"[{mode_name}] ⚠️ 盘中止损触发 | 最低={pnl_intraday_low:.2f}% | 收盘={pnl_close:.2f}%")
-            self.strat.log(f"   → 模拟盘中卖出价格=${estimated_exit_price:.2f} (含0.5%滑点)")
+            self.strat.log(f"   → 模拟盘中卖出价格=${estimated_exit_price:.2f} (Almgren-Chriss滑点)")
 
             self.strat.order = self.strat.close()
             dt = self.strat.data.datetime.date(0)
