@@ -181,8 +181,8 @@ def run_backtest(
         use_yfinance=True,
         csv_path=None,
         cash=100000,
-        commission=0.0008,
-        slippage=0.0005,
+        commission=0.0015,
+        slippage=0.0015,
         custom_params=None,
         show_config=True,
         show_plot=True,
@@ -195,8 +195,8 @@ def run_backtest(
         use_yfinance: ``True`` 时从 Yahoo Finance 拉取数据；否则读取本地 CSV。
         csv_path: 本地 CSV 文件路径，仅 ``use_yfinance=False`` 时使用。
         cash: 初始资金（美元）。
-        commission: 单边手续费比例（例如 ``0.0008`` 表示 0.08%）。
-        slippage: 成交滑点比例（例如 ``0.0005`` 表示 0.05%）。
+        commission: 单边手续费比例（例如 ``0.0015`` 表示 0.15%）。
+        slippage: 成交滑点比例（例如 ``0.0015`` 表示 0.15%）。
         custom_params: 策略参数覆盖项，优先级最高。
         show_config: 保留兼容参数，不再使用手工配置。
         show_plot: 是否绘制“K线+买卖点+收益”图。
@@ -238,6 +238,9 @@ def run_backtest(
 
     if slippage and slippage > 0:
         cerebro.broker.set_slippage_perc(slippage)
+
+    total_one_side_cost = (commission + slippage) * 100
+    print(f"\n💸 单边交易成本假设: {total_one_side_cost:.2f}% (commission+slippage)")
 
     # 6. 策略参数：仅保留必要覆盖，其余全部交由策略内在线学习
     strategy_params = dict(print_log=True)
