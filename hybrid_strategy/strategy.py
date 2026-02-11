@@ -57,6 +57,12 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         add_breakout_n=10,
         # 加仓量比要求（可低于首仓）
         add_vol_ratio_min=0.85,
+        # 波段回踩入场最低量比（低于突破入场）
+        swing_vol_ratio_min=0.75,
+        # 波段回踩入场要求的最低趋势分
+        swing_trend_score_min=3,
+        # 波段回踩识别窗口（bar）
+        swing_pullback_lookback=8,
         # 入场后可容忍回撤（超过可能减仓/退出）
         drawdown_tolerance=0.08,
 
@@ -71,6 +77,10 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         stop_loss_pct=8.0,
         # 分批止盈阈值（百分比）
         profit_take_pct=30.0,
+        # 浮盈达到阈值后将止损抬升至保本（百分比）
+        break_even_trigger_pct=4.0,
+        # 保本线缓冲（百分比，防止过早扫损）
+        break_even_buffer_pct=0.2,
 
         # ===== 4) 模式识别/切换参数 =====
         # 最低可交易 K 线数量（确保 EMA200 等长周期指标稳定）
@@ -199,6 +209,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         self.profit_taken = False
         self.base_probe_counter = 0
         self.base_pyramid_count = 0
+        self.entry_peak_price = 0.0
 
         self.rule_regime = RegimeDetector(self)
         self.regime = HMMRegimeDetector(self, fallback_detector=self.rule_regime) if self.p.use_hmm_regime else self.rule_regime
@@ -303,8 +314,16 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
 
         # 持仓：出场责任链
         if self.position:
+            self.entry_peak_price = max(self.entry_peak_price, float(d.close[0]))
+
             # 1) 止损（高波动票会跳过）
             if self.exit_mgr.check_stop_loss(mode_name):
+                self.cooldown = self.p.cooldown_bars
+                self._reset_state()
+                return
+
+            # 1.5) 浮盈后保本止损
+            if self.exit_mgr.check_break_even(mode_name):
                 self.cooldown = self.p.cooldown_bars
                 self._reset_state()
                 return
@@ -428,19 +447,25 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
             if self.p.require_main_uptrend and getattr(d, "is_main_uptrend")[0] < 1:
                 return
 
-            if getattr(d, "vol_ratio")[0] < float(self.p.vol_ratio_min):
-                return
-
-            if float(d.close[0]) <= float(self.hhv_entry[-1]):
+            is_breakout_entry = (
+                float(getattr(d, "vol_ratio")[0]) >= float(self.p.vol_ratio_min)
+                and float(d.close[0]) > float(self.hhv_entry[-1])
+            )
+            is_swing_entry = self._should_open_swing_entry(d)
+            if not (is_breakout_entry or is_swing_entry):
                 return
 
             self.tranche = 1
             self.pb_touched = False
             self.profit_taken = False
             self.base_pyramid_count = 0
-            if not self._allow_by_meta_filter(mode_id, "TRANCHE1"):
+            self.entry_peak_price = float(d.close[0])
+            entry_tag = "TRANCHE1" if is_breakout_entry else "SWING1"
+            entry_reason = "第1档突破首仓" if is_breakout_entry else "波段回踩反弹首仓"
+
+            if not self._allow_by_meta_filter(mode_id, entry_tag):
                 return
-            self.pos_mgr.scale_to(self.p.tranche_targets[0], "第1档突破首仓", mode_name, "TRANCHE1")
+            self.pos_mgr.scale_to(self.p.tranche_targets[0], entry_reason, mode_name, entry_tag)
             return
 
     def notify_order(self, order):
@@ -456,3 +481,29 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         self.pb_touched = False
         self.profit_taken = False
         self.base_pyramid_count = 0
+        self.entry_peak_price = 0.0
+
+    def _should_open_swing_entry(self, d) -> bool:
+        if len(self) < int(self.p.swing_pullback_lookback) + 3:
+            return False
+
+        close = float(d.close[0])
+        ema20 = float(self.ema20[0])
+        ema50 = float(self.ema50[0])
+        atrv = float(self.atr[0])
+
+        if close <= ema20 or ema20 <= ema50:
+            return False
+
+        if float(getattr(d, "trend_score")[0]) < float(self.p.swing_trend_score_min):
+            return False
+
+        if float(getattr(d, "vol_ratio")[0]) < float(self.p.swing_vol_ratio_min):
+            return False
+
+        lookback = int(self.p.swing_pullback_lookback)
+        recent_low = min(float(d.low[-i]) for i in range(1, lookback + 1))
+        pullback_touched = recent_low <= ema20 + 0.5 * atrv
+
+        rebound = close > float(d.high[-1]) and close > float(d.close[-1])
+        return pullback_touched and rebound
