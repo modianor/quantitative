@@ -411,15 +411,15 @@ class StockProfileLearner:
             if self.stage in {"MARKDOWN", "DISTRIBUTION"}:
                 return -0.15
             if self.stage == "MARKUP":
-                return 0.08
+                return 0.12
         if param_name == "target_vol_annual":
-            return 0.10 if self.stage == "MARKUP" and breakout_success > 0.45 else -0.10 if vol > 0.45 else 0.0
+            return 0.14 if self.stage == "MARKUP" and breakout_success > 0.45 else -0.10 if vol > 0.45 else 0.0
         if param_name in {"hmm_min_confidence", "hmm_trend_prob_threshold"}:
             return 0.05 if self.stage in {"MARKDOWN", "DISTRIBUTION", "RANGE"} else -0.03 if self.stage == "MARKUP" else 0.0
         if param_name in {"vol_ratio_min", "add_vol_ratio_min"}:
-            return 0.10 if self.stage in {"RANGE", "DISTRIBUTION"} else -0.06 if self.stage == "MARKUP" else 0.0
+            return 0.10 if self.stage in {"RANGE", "DISTRIBUTION"} else -0.10 if self.stage == "MARKUP" else 0.0
         if param_name == "breakout_n":
-            return 0.50 if self.stage in {"RANGE", "ACCUMULATION"} else -0.20 if self.stage == "MARKUP" else 0.0
+            return 0.50 if self.stage in {"RANGE", "ACCUMULATION"} else -0.25 if self.stage == "MARKUP" else 0.0
         if param_name == "stop_loss_pct":
             return -0.10 if self.stage in {"MARKDOWN", "DISTRIBUTION"} else 0.05 if trend_persistence > 0.55 else 0.0
         if param_name == "profit_take_pct":
