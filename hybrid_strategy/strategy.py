@@ -325,6 +325,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         self.entry_profile = "NEUTRAL"
         self.current_market_bias = "NEUTRAL"
         self.breakout_guard_remaining = 0
+        self.entry_context = None
 
         self.rule_regime = RegimeDetector(self)
         self.regime = HMMRegimeDetector(self, fallback_detector=self.rule_regime) if self.p.use_hmm_regime else self.rule_regime
@@ -919,12 +920,29 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
 
     def notify_order(self, order):
         if order.status in [order.Completed, order.Canceled, order.Margin, order.Rejected]:
-            if order.status == order.Completed and order.issell():
-                self._consume_exit_for_meta()
-                if self.position.size == 0:
-                    self._apply_exit_cooldown()
-                    self._reset_state()
+            if order.status == order.Completed:
+                if order.isbuy() and self.position.size > 0:
+                    learner = getattr(self, "profile_learner", None)
+                    if learner is not None:
+                        self.entry_context = learner.context_key()
+                if order.issell():
+                    self._consume_exit_for_meta()
+                    if self.position.size == 0:
+                        self._apply_exit_cooldown()
+                        self._reset_state()
             self.order = None
+
+    def notify_trade(self, trade):
+        if not trade.isclosed:
+            return
+        learner = getattr(self, "profile_learner", None)
+        if learner is None:
+            return
+        pnl_pct = 0.0
+        if float(trade.price) > 0:
+            pnl_pct = float(trade.pnlcomm) / float(trade.price) * 100.0
+        learner.observe_trade(pnl_pct=pnl_pct, context=self.entry_context)
+        self.entry_context = None
 
     def _reset_state(self):
         self.tranche = 0
@@ -934,6 +952,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         self.entry_peak_price = 0.0
         self.entry_profile = "NEUTRAL"
         self.breakout_guard_remaining = 0
+        self.entry_context = None
 
     def _should_open_swing_entry(self, d) -> bool:
         if len(self) < int(self.p.swing_pullback_lookback) + 3:

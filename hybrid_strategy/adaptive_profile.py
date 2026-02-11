@@ -18,43 +18,20 @@ class StockProfileLearner:
         self.confidence = 0.0
         self.last_update_len = -1
         self.metrics: Dict[str, float] = {}
-
-        # Layer 3: f(StockType, Regime) -> 参数映射（乘法/加法）
-        self.parameter_map: Dict[Tuple[str, str], Dict[str, Tuple[str, float]]] = {
-            ("HIGH_BETA_GROWTH", "MARKUP"): {
-                "target_vol_annual": ("mul", 1.25),
-                "chand_atr_mult": ("mul", 1.12),
-                "breakout_n": ("set", 10.0),
-                "max_exposure": ("mul", 1.10),
-            },
-            ("CYCLICAL", "RANGE"): {
-                "breakout_n": ("set", 999.0),  # 近似关闭突破逻辑
-                "profit_take_pct": ("set", 8.0),
-                "stop_loss_pct": ("set", 5.0),
-                "add_vol_ratio_min": ("mul", 1.15),
-            },
-            ("DEFENSIVE", "MARKUP"): {
-                "target_vol_annual": ("mul", 0.90),
-                "max_exposure": ("mul", 1.05),
-                "hmm_trend_prob_threshold": ("mul", 0.95),
-            },
-            ("CHOPPY", "DISTRIBUTION"): {
-                "max_exposure": ("mul", 0.78),
-                "hmm_min_confidence": ("add", 0.08),
-                "hmm_trend_prob_threshold": ("add", 0.06),
-                "profit_take_pct": ("mul", 0.86),
-                "stop_loss_pct": ("mul", 0.82),
-            },
-            ("HIGH_BETA_GROWTH", "MARKDOWN"): {
-                "max_exposure": ("mul", 0.72),
-                "target_vol_annual": ("mul", 0.85),
-                "hmm_min_confidence": ("add", 0.06),
-            },
-            ("DEFENSIVE", "ACCUMULATION"): {
-                "max_exposure": ("mul", 0.92),
-                "hmm_min_confidence": ("add", 0.04),
-                "add_vol_ratio_min": ("mul", 1.08),
-            },
+        # 在线学习状态：每个(票型, 阶段, 参数)都维护一组可学习偏移量。
+        # value 表示相对基础参数的偏移（mul型表示比例偏移，add型表示绝对偏移）。
+        self.learned_state: Dict[Tuple[str, str, str], Dict[str, float]] = {}
+        self.param_meta: Dict[str, Dict[str, float | str]] = {
+            "vol_ratio_min": {"op": "add", "lr": 0.04, "floor": -0.35, "cap": 0.35},
+            "add_vol_ratio_min": {"op": "add", "lr": 0.04, "floor": -0.30, "cap": 0.40},
+            "target_vol_annual": {"op": "mul", "lr": 0.05, "floor": -0.30, "cap": 0.30},
+            "max_exposure": {"op": "mul", "lr": 0.05, "floor": -0.35, "cap": 0.20},
+            "hmm_min_confidence": {"op": "add", "lr": 0.04, "floor": -0.10, "cap": 0.20},
+            "hmm_trend_prob_threshold": {"op": "add", "lr": 0.04, "floor": -0.10, "cap": 0.20},
+            "profit_take_pct": {"op": "mul", "lr": 0.05, "floor": -0.35, "cap": 0.35},
+            "stop_loss_pct": {"op": "mul", "lr": 0.05, "floor": -0.35, "cap": 0.20},
+            "chand_atr_mult": {"op": "mul", "lr": 0.04, "floor": -0.25, "cap": 0.25},
+            "breakout_n": {"op": "mul", "lr": 0.03, "floor": -0.50, "cap": 0.80},
         }
 
     def update(self) -> None:
@@ -315,19 +292,42 @@ class StockProfileLearner:
         raw = 0.30 * trend_score + 0.20 * vol_score + 0.20 * persistence_score + 0.15 * breakout_score + 0.15 * compress_score
         return max(0.15, min(0.95, raw))
 
-    def _apply_mapping(self, param_name: str, base_value: float) -> Optional[float]:
-        key = (self.archetype, self.stage)
-        rule = self.parameter_map.get(key, {}).get(param_name)
-        if not rule:
-            return None
-        op, x = rule
-        if op == "set":
-            return float(x)
-        if op == "mul":
-            return float(base_value) * float(x)
-        if op == "add":
-            return float(base_value) + float(x)
-        return None
+    def context_key(self) -> Tuple[str, str]:
+        return self.archetype, self.stage
+
+    def _state_for(self, context: Tuple[str, str], param_name: str) -> Dict[str, float]:
+        key = (context[0], context[1], param_name)
+        st = self.learned_state.get(key)
+        if st is None:
+            st = {"value": 0.0, "count": 0.0}
+            self.learned_state[key] = st
+        return st
+
+    def _heuristic_bias(self, param_name: str) -> float:
+        vol = float(self.metrics.get("annual_vol", 0.0))
+        breakout_success = float(self.metrics.get("breakout_success", 0.0))
+        trend_persistence = float(self.metrics.get("trend_persistence", 0.5))
+
+        if param_name == "max_exposure":
+            if self.stage in {"MARKDOWN", "DISTRIBUTION"}:
+                return -0.15
+            if self.stage == "MARKUP":
+                return 0.08
+        if param_name == "target_vol_annual":
+            return 0.10 if self.stage == "MARKUP" and breakout_success > 0.45 else -0.10 if vol > 0.45 else 0.0
+        if param_name in {"hmm_min_confidence", "hmm_trend_prob_threshold"}:
+            return 0.05 if self.stage in {"MARKDOWN", "DISTRIBUTION", "RANGE"} else -0.03 if self.stage == "MARKUP" else 0.0
+        if param_name in {"vol_ratio_min", "add_vol_ratio_min"}:
+            return 0.10 if self.stage in {"RANGE", "DISTRIBUTION"} else -0.06 if self.stage == "MARKUP" else 0.0
+        if param_name == "breakout_n":
+            return 0.50 if self.stage in {"RANGE", "ACCUMULATION"} else -0.20 if self.stage == "MARKUP" else 0.0
+        if param_name == "stop_loss_pct":
+            return -0.10 if self.stage in {"MARKDOWN", "DISTRIBUTION"} else 0.05 if trend_persistence > 0.55 else 0.0
+        if param_name == "profit_take_pct":
+            return 0.12 if self.stage == "MARKUP" else -0.10 if self.stage in {"RANGE", "DISTRIBUTION"} else 0.0
+        if param_name == "chand_atr_mult":
+            return 0.10 if self.stage == "MARKUP" else -0.10 if self.stage in {"RANGE", "MARKDOWN"} else 0.0
+        return 0.0
 
     def get_adjustment(self, param_name: str, base_value: float) -> float:
         """返回参数自适应后的值。"""
@@ -338,33 +338,40 @@ class StockProfileLearner:
         if conf < float(getattr(self.p, "adaptive_confidence_min", 0.30)):
             return float(base_value)
 
-        mapped = self._apply_mapping(param_name, float(base_value))
-        value = float(mapped) if mapped is not None else float(base_value)
+        context = self.context_key()
+        meta = self.param_meta.get(param_name)
+        if not meta:
+            return self._clip_param(param_name, float(base_value))
 
-        # 兼容旧逻辑：在映射基础上做轻量微调
-        stage_alias = self._legacy_stage_alias(self.stage)
-        if param_name == "vol_ratio_min":
-            if self.archetype in {"CHOPPY", "CYCLICAL"}:
-                value += 0.12 * conf
-            elif self.archetype == "HIGH_BETA_GROWTH":
-                value -= 0.07 * conf
-        elif param_name == "add_vol_ratio_min":
-            if stage_alias in {"SIDEWAYS", "DISTRIBUTION"}:
-                value += 0.18 * conf
-            elif stage_alias == "MARKUP":
-                value -= 0.04 * conf
-        elif param_name == "target_vol_annual":
-            if self.archetype == "HIGH_BETA_GROWTH" and self.stage == "MARKUP":
-                value *= 1.0 + 0.20 * conf
-            elif self.archetype in {"CHOPPY", "CYCLICAL"}:
-                value *= 1.0 - 0.18 * conf
-        elif param_name == "max_exposure":
-            if self.stage == "MARKUP":
-                value *= 1.0 + 0.15 * conf
-            elif self.stage in {"MARKDOWN", "DISTRIBUTION"}:
-                value *= 1.0 - 0.22 * conf
+        state = self._state_for(context, param_name)
+        learned = float(state.get("value", 0.0))
+        heuristic = self._heuristic_bias(param_name)
+        signal = (0.65 * heuristic + 0.35 * learned) * conf
+
+        if str(meta.get("op")) == "mul":
+            value = float(base_value) * (1.0 + signal)
+        else:
+            value = float(base_value) + signal
 
         return self._clip_param(param_name, value)
+
+    def observe_trade(self, pnl_pct: float, context: Optional[Tuple[str, str]] = None) -> None:
+        """根据平仓结果更新在线学习参数。"""
+        if context is None:
+            context = self.context_key()
+
+        # reward压缩到[-1, 1]，提升稳健性
+        reward = math.tanh(float(pnl_pct) / 8.0)
+        conf = max(0.15, float(self.confidence))
+        for param_name, meta in self.param_meta.items():
+            st = self._state_for(context, param_name)
+            n = float(st.get("count", 0.0))
+            lr = float(meta.get("lr", 0.03)) / (1.0 + 0.05 * n)
+            updated = float(st.get("value", 0.0)) + lr * reward * conf
+            lo = float(meta.get("floor", -1.0))
+            hi = float(meta.get("cap", 1.0))
+            st["value"] = min(max(updated, lo), hi)
+            st["count"] = n + 1.0
 
     @staticmethod
     def _clip_param(param_name: str, value: float) -> float:

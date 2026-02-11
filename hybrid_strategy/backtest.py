@@ -11,13 +11,8 @@ from .data_utils import load_from_yfinance, load_from_csv, detect_main_uptrend, 
 from .advanced_models import DeflatedSharpeRatio, RiskParityAllocator, RealizedVolatilityEstimator
 from .strategy import OptimizedHybrid4ModeV2
 
-try:
-    from stock_configs import get_stock_config, print_stock_info, list_all_stocks
-
-    CONFIG_LOADED = True
-except ImportError:
-    print("⚠️ 警告: 未找到stock_configs.py，使用内置配置")
-    CONFIG_LOADED = False
+# 统一改为全自适应参数引擎，不再依赖手工 stock_configs.py
+CONFIG_LOADED = False
 
 def _validate_backtest_data(symbol: str, df: pd.DataFrame, min_required_bars: int):
     if df is None or df.empty:
@@ -179,7 +174,7 @@ def _print_identified_summary(strat):
 
 
 # =============================
-# 回测入口（使用stock_configs.py）
+# 回测入口（全自适应，无手工配置文件）
 # =============================
 def run_backtest(
         symbol="NVDA",
@@ -203,7 +198,7 @@ def run_backtest(
         commission: 单边手续费比例（例如 ``0.0008`` 表示 0.08%）。
         slippage: 成交滑点比例（例如 ``0.0005`` 表示 0.05%）。
         custom_params: 策略参数覆盖项，优先级最高。
-        show_config: 是否打印 ``stock_configs.py`` 中的股票配置信息。
+        show_config: 保留兼容参数，不再使用手工配置。
         show_plot: 是否绘制“K线+买卖点+收益”图。
         print_identified: 是否打印识别到的市场模式与交易信号。
 
@@ -212,33 +207,7 @@ def run_backtest(
             - strategy: 回测完成后的策略实例。
             - DataFrame: 追加信号列后的行情数据。
     """
-    # 1. 加载股票配置
-    if CONFIG_LOADED:
-        config = get_stock_config(symbol)
-
-        # 显示配置信息
-        if show_config:
-            print_stock_info(symbol)
-
-        # 检查黑名单
-        if config["status"] == "blacklisted":
-            print(f"⛔ {symbol} 在黑名单中，停止回测")
-            return None, None
-
-        # 获取参数
-        params = config.get("params", {})
-        category = config.get("category", "medium_vol")
-
-    else:
-        # 未加载配置文件，使用默认参数
-        print(f"⚠️ 使用默认参数测试 {symbol}")
-        params = {
-            "stop_loss_pct": 10.0,
-            "profit_take_pct": 25.0,
-            "vol_ratio_min": 1.2,
-            "chand_atr_mult": 2.8,
-        }
-        category = "unknown"
+    category = "adaptive"
 
     # 2. 加载数据
     if use_yfinance:
@@ -269,56 +238,13 @@ def run_backtest(
     if slippage and slippage > 0:
         cerebro.broker.set_slippage_perc(slippage)
 
-    # 6. 策略参数（基础参数）
-    strategy_params = dict(
-        max_exposure=0.60,
-        use_vol_targeting=True,
-        target_vol_annual=0.20,
-        vol_lookback=20,
-        vol_floor_annual=0.10,
-        vol_cap_annual=0.80,
-        min_vol_scalar=0.30,
-        max_vol_scalar=1.00,
-        tranche_targets=(0.30, 0.60, 1.00),
-        probe_ratio=0.15,
-        drawdown_tolerance=0.10,
-        stop_loss_pct=10.0,  # 默认值
-        profit_take_pct=25.0,  # 默认值
-        high_zone_dd_th=-0.10,
-        cross_top_min=8,
-        atr_shrink_ratio=0.7,
-        base_zone_dd_th=-0.35,
-        base_atrp_th=0.09,
-        base_hl_consecutive=2,
-        base_probe_cooldown=6,
-        base_pyramid_profit_th=3.0,
-        cooldown_bars=1,
-        add_vol_ratio_min=0.85,
-        require_main_uptrend=False,
-        allow_entry_in_top_chop=True,
-        use_hmm_regime=True,
-        hmm_warmup_bars=240,
-        hmm_min_confidence=0.38,
-        hmm_mode_buffer_days=1,
-        use_meta_labeling=True,
-        meta_prob_threshold=0.48,
-        meta_min_samples=25,
-        meta_retrain_interval=8,
-        meta_dynamic_shift_enabled=True,
-        meta_base_shift=-0.03,
-        meta_shift_uptrend_bonus=-0.04,
-        meta_shift_drawdown_penalty=0.08,
-        meta_shift_vol_penalty=0.05,
-        print_log=True,
-    )
-
-    # 7. 应用股票配置
-    strategy_params.update(params)
+    # 6. 策略参数：仅保留必要覆盖，其余全部交由策略内在线学习
+    strategy_params = dict(print_log=True)
 
     # 8. 应用自定义参数（最高优先级）
     if custom_params:
         strategy_params.update(custom_params)
-        print(f"\n⚙️  应用自定义参数: {custom_params}")
+    print(f"\n⚙️  应用自定义参数: {custom_params}")
 
     # 回测至少需要足够数据支撑长周期指标（EMA200等）
     min_required_bars = int(strategy_params.get("min_bars_required", 210))
@@ -331,13 +257,9 @@ def run_backtest(
     print(f"\n{'=' * 60}")
     print(f"📋 {symbol} 回测配置 ({category.upper()})")
     print(f"{'=' * 60}")
-    print(f"止损: {strategy_params['stop_loss_pct']}%")
-    print(f"止盈: {strategy_params['profit_take_pct']}%")
-    print(f"Chandelier: {strategy_params.get('chand_atr_mult', 2.8)}")
-    print(f"量能要求: {strategy_params.get('vol_ratio_min', 1.2)}x")
-    print(f"Vol Targeting: {'ON' if strategy_params.get('use_vol_targeting', True) else 'OFF'} | "
-          f"目标波动={strategy_params.get('target_vol_annual', 0.20):.2f}")
-    print(f"Regime引擎: {'HMM' if strategy_params.get('use_hmm_regime', True) else 'RULE'}")
+    print("参数模式: 全自适应（基础参数 + 在线学习）")
+    print(f"Vol Targeting: {'ON' if strategy_params.get('use_vol_targeting', True) else 'ON'}")
+    print(f"Regime引擎: {'HMM' if strategy_params.get('use_hmm_regime', True) else 'HMM'}")
     print(f"{'=' * 60}\n")
 
     cerebro.addstrategy(OptimizedHybrid4ModeV2, **strategy_params)
@@ -389,7 +311,7 @@ def run_backtest(
             )
 
     print("\n" + "=" * 60)
-    print("回测结果 v2.2 (独立配置文件)")
+    print("回测结果 v2.3 (全自适应学习)")
     print("=" * 60)
     print(f"标的: {symbol}")
     print(f"初始资金: ${start:,.2f}")
@@ -426,19 +348,16 @@ def batch_backtest(symbols=None, tier=None, show_details=False, use_risk_parity=
     Returns:
         list[dict]: 每个元素包含 ``symbol/return/win_rate/profit_factor/max_dd/trades``。
     """
-    if not CONFIG_LOADED:
-        print("❌ 未加载stock_configs.py，无法批量回测")
-        return
-
     # 确定要测试的股票列表
     if symbols:
         test_symbols = symbols
-    elif tier:
-        stocks = list_all_stocks(tier=tier)
-        test_symbols = list(stocks.keys())
     else:
-        stocks = list_all_stocks()
-        test_symbols = list(stocks.keys())
+        default_by_tier = {
+            "S": ["NVDA", "MSFT", "AAPL", "GOOGL", "META"],
+            "A": ["AMZN", "TSLA", "AVGO", "NFLX", "AMD"],
+            "B": ["QCOM", "INTC", "ADBE", "CRM", "ORCL"],
+        }
+        test_symbols = default_by_tier.get(str(tier).upper(), default_by_tier["S"] + default_by_tier["A"])
 
     print(f"\n{'=' * 60}")
     print(f"批量回测 - 共{len(test_symbols)}只股票")
