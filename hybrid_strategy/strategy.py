@@ -200,7 +200,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         # 是否启用元标签过滤器（过滤低质量入场信号）
         use_meta_labeling=True,
         # 通过信号的最低胜率概率阈值
-        meta_prob_threshold=0.50,
+        meta_prob_threshold=0.48,
         # Meta 2.0 分层决策阈值
         meta_reject_threshold=0.30,
         meta_probe_threshold=0.50,
@@ -213,6 +213,23 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         meta_retrain_interval=8,
         # 启用跨资产相对强弱特征（若数据中有benchmark_close）
         use_cross_asset_meta=True,
+        # 动态阈值：按市场状态自动放松/收紧过滤（负值=更容易放行）
+        meta_dynamic_shift_enabled=True,
+        # 全局基础偏移：默认略微降低过滤强度
+        meta_base_shift=-0.03,
+        # 主升浪环境放松幅度（提高上涨期弹性）
+        meta_shift_uptrend_bonus=-0.04,
+        # 回撤放大惩罚（继续控回撤）
+        meta_shift_drawdown_penalty=0.08,
+        # 波动过高惩罚（避免噪声期过度交易）
+        meta_shift_vol_penalty=0.05,
+        # 动态偏移夹断边界
+        meta_shift_min=-0.10,
+        meta_shift_max=0.12,
+        # 回撤惩罚启动阈值（账户峰值回撤）
+        meta_drawdown_penalty_start=0.06,
+        # 回撤惩罚饱和阈值（超过该值按满额惩罚）
+        meta_drawdown_penalty_full=0.18,
 
         # ===== 8) 市场环境因子（仅用于放行与阈值调节） =====
         env_min_breadth=0.52,
@@ -326,6 +343,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         self.rec_regime = []
         self.rec_mode_name = []
         self.trade_marks = []
+        self.equity_peak = float(self.broker.getvalue())
 
     def _tsmom_snapshot(self) -> dict:
         if not bool(getattr(self.p, "use_tsmom_filter", True)):
@@ -512,7 +530,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
 
         features = self._build_meta_features(mode_id)
         env = self._market_environment_snapshot()
-        threshold_shift = float(self.p.env_threshold_shift_weak) if env["is_weak"] else 0.0
+        threshold_shift = self._adaptive_meta_threshold_shift(env, mode_name)
         advice = self.meta_filter.advise_signal(features, threshold_shift=threshold_shift)
 
         if not advice["allow"]:
@@ -523,6 +541,46 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
 
         self.meta_recorder.mark_entry(features, float(self.datas[0].close[0]), signal_tag)
         return advice
+
+    def _adaptive_meta_threshold_shift(self, env: dict, mode_name: str) -> float:
+        """动态调整 Meta 过滤阈值。
+
+        目标：
+        - 上涨期适度放松（拿回弹性）
+        - 回撤/高波动期自动收紧（优先控回撤）
+        """
+        if not bool(getattr(self.p, "meta_dynamic_shift_enabled", True)):
+            return float(self.p.env_threshold_shift_weak) if env.get("is_weak", False) else 0.0
+
+        shift = float(getattr(self.p, "meta_base_shift", -0.03))
+
+        # 1) 主升浪奖励：在高景气趋势里适度降低过滤阈值
+        if self.current_market_bias == "MAIN_UPTREND" and mode_name == "TREND_RUN":
+            shift += float(getattr(self.p, "meta_shift_uptrend_bonus", -0.04))
+
+        # 2) 回撤惩罚：账户回撤越深，阈值越严格
+        eq = float(self.broker.getvalue())
+        peak = max(float(getattr(self, "equity_peak", eq)), 1e-9)
+        drawdown = max(0.0, 1.0 - eq / peak)
+        dd_start = float(getattr(self.p, "meta_drawdown_penalty_start", 0.06))
+        dd_full = float(getattr(self.p, "meta_drawdown_penalty_full", 0.18))
+        if drawdown > dd_start:
+            denom = max(dd_full - dd_start, 1e-9)
+            dd_score = min(1.0, (drawdown - dd_start) / denom)
+            shift += dd_score * float(getattr(self.p, "meta_shift_drawdown_penalty", 0.08))
+
+        # 3) 波动惩罚：短期波动越高，阈值越严格
+        max_vol = max(float(getattr(self.p, "env_max_volatility", 0.06)), 1e-9)
+        vol_score = max(0.0, float(env.get("volatility", 0.0)) / max_vol - 1.0)
+        shift += min(1.0, vol_score) * float(getattr(self.p, "meta_shift_vol_penalty", 0.05))
+
+        # 4) 弱环境保守补偿
+        if env.get("is_weak", False):
+            shift += float(getattr(self.p, "env_threshold_shift_weak", 0.05))
+
+        shift_min = float(getattr(self.p, "meta_shift_min", -0.10))
+        shift_max = float(getattr(self.p, "meta_shift_max", 0.12))
+        return min(max(shift, shift_min), shift_max)
 
     def _apply_exit_cooldown(self):
         reason = self.last_exit_reason
@@ -568,6 +626,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         self.rec_equity.append(float(self.broker.getvalue()))
         self.rec_regime.append(int(mode_id))
         self.rec_mode_name.append(mode_name)
+        self.equity_peak = max(float(self.equity_peak), float(self.broker.getvalue()))
 
         if self.order:
             return
