@@ -141,6 +141,12 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         use_meta_labeling=True,
         # 通过信号的最低胜率概率阈值
         meta_prob_threshold=0.50,
+        # Meta 2.0 分层决策阈值
+        meta_reject_threshold=0.30,
+        meta_probe_threshold=0.50,
+        meta_half_threshold=0.65,
+        # 信号被拒绝后等待bar数
+        meta_wait_bars=2,
         # 训练前最少样本数
         meta_min_samples=25,
         # 模型重训练间隔（每 N 笔样本）
@@ -148,7 +154,19 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         # 启用跨资产相对强弱特征（若数据中有benchmark_close）
         use_cross_asset_meta=True,
 
-        # ===== 8) 其他 =====
+        # ===== 8) 市场环境因子（仅用于放行与阈值调节） =====
+        env_min_breadth=0.52,
+        env_max_volatility=0.06,
+        env_min_liquidity=0.8,
+        env_threshold_shift_weak=0.05,
+
+        # ===== 9) 退出分型冷却 & 影子仓 =====
+        cooldown_noise_bars=2,
+        cooldown_trend_fail_bars=1,
+        cooldown_regime_fail_bars=5,
+        shadow_horizons=(5, 10, 20),
+
+        # ===== 10) 其他 =====
         # 是否打印详细日志
         print_log=False,
         # 交易起始日期（早于该日期仅观察不下单）
@@ -218,8 +236,23 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
 
         self.last_exit_tag = None
         self.last_exit_price = None
+        self.last_exit_reason = None
+        self.meta_wait_count = 0
+        self.engine_by_mode = {
+            "TREND_RUN": "TREND_ENGINE",
+            "TOP_CHOP": "RANGE_ENGINE",
+            "DRAWDOWN": "RECOVERY_ENGINE",
+            "BASE_BUILD": "RECOVERY_ENGINE",
+        }
+        self.shadow_trades = []
+        self.shadow_completed = []
+
         self.meta_filter = MetaLabelingFilter(
             prob_threshold=float(self.p.meta_prob_threshold),
+            reject_threshold=float(self.p.meta_reject_threshold),
+            probe_threshold=float(self.p.meta_probe_threshold),
+            half_threshold=float(self.p.meta_half_threshold),
+            wait_bars_on_reject=int(self.p.meta_wait_bars),
             min_samples=int(self.p.meta_min_samples),
             retrain_interval=int(self.p.meta_retrain_interval),
         )
@@ -258,23 +291,103 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
             relative_strength,
         ]
 
-    def _allow_by_meta_filter(self, mode_id: int, signal_tag: str) -> bool:
+    def _market_environment_snapshot(self) -> dict:
+        d = self.datas[0]
+        close = float(d.close[0])
+        prev_close = float(d.close[-1]) if len(self) > 1 else close
+        ret = close / max(prev_close, 1e-9) - 1.0
+
+        breadth = 0.5
+        if hasattr(d, "mom_score"):
+            breadth = float(getattr(d, "mom_score")[0]) / 4.0
+        elif hasattr(d, "trend_score"):
+            breadth = float(getattr(d, "trend_score")[0]) / 6.0
+
+        volatility = abs(ret)
+        if close > 0:
+            volatility = max(volatility, float(self.atr[0]) / close)
+
+        liquidity = float(getattr(d, "vol_ratio")[0]) if hasattr(d, "vol_ratio") else 1.0
+        return {
+            "breadth": breadth,
+            "volatility": volatility,
+            "liquidity": liquidity,
+            "is_weak": (
+                breadth < float(self.p.env_min_breadth)
+                or volatility > float(self.p.env_max_volatility)
+                or liquidity < float(self.p.env_min_liquidity)
+            ),
+        }
+
+    def _record_shadow_trade(self, signal_tag: str, mode_name: str, proba: float):
+        d = self.datas[0]
+        self.shadow_trades.append(
+            {
+                "entry_index": len(self),
+                "entry_price": float(d.close[0]),
+                "signal_tag": signal_tag,
+                "mode_name": mode_name,
+                "meta_proba": float(proba),
+                "results": {},
+            }
+        )
+
+    def _update_shadow_trades(self):
+        if not self.shadow_trades:
+            return
+
+        close = float(self.datas[0].close[0])
+        keep = []
+        max_h = max(tuple(self.p.shadow_horizons))
+        for trade in self.shadow_trades:
+            age = len(self) - int(trade["entry_index"])
+            for h in tuple(self.p.shadow_horizons):
+                if age >= int(h) and h not in trade["results"]:
+                    entry = float(trade["entry_price"])
+                    trade["results"][h] = close / max(entry, 1e-9) - 1.0
+            if age >= max_h:
+                self.shadow_completed.append(trade)
+            else:
+                keep.append(trade)
+        self.shadow_trades = keep
+
+    def _active_engine(self, mode_name: str) -> str:
+        return self.engine_by_mode.get(mode_name, "TREND_ENGINE")
+
+    def _meta_advice(self, mode_id: int, signal_tag: str, mode_name: str) -> dict:
         if not bool(self.p.use_meta_labeling):
-            return True
+            return {"allow": True, "size_multiplier": 1.0, "wait_bars": 0, "proba": 0.5, "tier": "OFF"}
 
         features = self._build_meta_features(mode_id)
-        allowed, proba = self.meta_filter.allow_signal(features)
-        if not allowed:
-            self.log(f"[META] 过滤信号 {signal_tag} | 通过概率={proba:.3f}")
-            return False
+        env = self._market_environment_snapshot()
+        threshold_shift = float(self.p.env_threshold_shift_weak) if env["is_weak"] else 0.0
+        advice = self.meta_filter.advise_signal(features, threshold_shift=threshold_shift)
+
+        if not advice["allow"]:
+            self.log(f"[META] 过滤信号 {signal_tag} | 概率={advice['proba']:.3f} | 分层={advice['tier']}")
+            self.meta_wait_count = max(int(self.meta_wait_count), int(advice.get("wait_bars", 0)))
+            self._record_shadow_trade(signal_tag, mode_name, advice["proba"])
+            return advice
 
         self.meta_recorder.mark_entry(features, float(self.datas[0].close[0]), signal_tag)
-        return True
+        return advice
+
+    def _apply_exit_cooldown(self):
+        reason = self.last_exit_reason
+        if reason == "REGIME_FAIL":
+            self.cooldown = int(self.p.cooldown_regime_fail_bars)
+        elif reason == "TREND_FAIL":
+            self.cooldown = int(self.p.cooldown_trend_fail_bars)
+        elif reason == "NOISE":
+            self.cooldown = int(self.p.cooldown_noise_bars)
+        else:
+            self.cooldown = int(self.p.cooldown_bars)
 
     def _consume_exit_for_meta(self):
         if not bool(self.p.use_meta_labeling):
             self.last_exit_tag = None
             self.last_exit_price = None
+            self.last_exit_reason = None
             return
 
         if self.last_exit_tag is None or self.last_exit_price is None:
@@ -287,12 +400,15 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
 
         self.last_exit_tag = None
         self.last_exit_price = None
+        self.last_exit_reason = None
 
     def next(self):
         d = self.datas[0]
         dt = d.datetime.date(0)
 
         mode_id, mode_name = self.regime.get_mode()
+        active_engine = self._active_engine(mode_name)
+        self._update_shadow_trades()
 
         self.rec_dates.append(dt)
         self.rec_close.append(float(d.close[0]))
@@ -309,6 +425,9 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         if self.base_probe_counter > 0:
             self.base_probe_counter -= 1
 
+        if self.meta_wait_count > 0:
+            self.meta_wait_count -= 1
+
         if self.p.trade_start_date is not None and dt < self.p.trade_start_date:
             return
 
@@ -318,13 +437,13 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
 
             # 1) 止损（高波动票会跳过）
             if self.exit_mgr.check_stop_loss(mode_name):
-                self.cooldown = self.p.cooldown_bars
+                self._apply_exit_cooldown()
                 self._reset_state()
                 return
 
             # 1.5) 浮盈后保本止损
             if self.exit_mgr.check_break_even(mode_name):
-                self.cooldown = self.p.cooldown_bars
+                self._apply_exit_cooldown()
                 self._reset_state()
                 return
 
@@ -338,12 +457,12 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
 
             # 4) Chandelier
             if self.exit_mgr.check_chandelier(mode_name):
-                self.cooldown = self.p.cooldown_bars
+                self._apply_exit_cooldown()
                 self._reset_state()
                 return
 
-            # 持仓：加仓
-            if mode_name == "DRAWDOWN":
+            # 持仓：加仓（由当前引擎独占发言权）
+            if active_engine == "RECOVERY_ENGINE" and mode_name == "DRAWDOWN":
                 return
 
             # BASE金字塔加仓
@@ -358,8 +477,10 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
                 if profit_pct >= float(self.p.base_pyramid_profit_th):
                     if self.base_probe_counter == 0:
                         new_ratio = float(self.p.probe_ratio) * (1 + self.base_pyramid_count + 1)
-                        if self._allow_by_meta_filter(mode_id, "PYRAMID"):
-                            self.pos_mgr.scale_to(new_ratio, f"BASE金字塔加仓{self.base_pyramid_count + 1}", mode_name,
+                        advice = self._meta_advice(mode_id, "PYRAMID", mode_name)
+                        if advice["allow"]:
+                            adj_ratio = new_ratio * float(advice["size_multiplier"])
+                            self.pos_mgr.scale_to(adj_ratio, f"BASE金字塔加仓{self.base_pyramid_count + 1}", mode_name,
                                                   "PYRAMID")
                             self.base_pyramid_count += 1
                             self.base_probe_counter = self.p.base_probe_cooldown
@@ -392,8 +513,10 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
                 if self.pb_touched:
                     if (not self.p.rebound_confirm) or (close > ema20):
                         if getattr(d, "vol_ratio")[0] >= 1.0:
-                            if self._allow_by_meta_filter(mode_id, "TRANCHE2"):
-                                self.pos_mgr.scale_to(self.p.tranche_targets[1], "第2档回踩确认", mode_name, "TRANCHE2")
+                            advice = self._meta_advice(mode_id, "TRANCHE2", mode_name)
+                            if advice["allow"]:
+                                target_ratio = float(self.p.tranche_targets[1]) * float(advice["size_multiplier"])
+                                self.pos_mgr.scale_to(target_ratio, "第2档回踩确认", mode_name, "TRANCHE2")
                                 self.tranche = 2
                             self.pb_touched = False
                 return
@@ -405,8 +528,10 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
 
                 if getattr(d, "vol_ratio")[0] >= float(self.p.add_vol_ratio_min):
                     if close > float(self.hhv_add[-1]):
-                        if self._allow_by_meta_filter(mode_id, "TRANCHE3"):
-                            self.pos_mgr.scale_to(self.p.tranche_targets[2], "第3档再突破", mode_name, "TRANCHE3")
+                        advice = self._meta_advice(mode_id, "TRANCHE3", mode_name)
+                        if advice["allow"]:
+                            target_ratio = float(self.p.tranche_targets[2]) * float(advice["size_multiplier"])
+                            self.pos_mgr.scale_to(target_ratio, "第3档再突破", mode_name, "TRANCHE3")
                             self.tranche = 3
                 return
 
@@ -416,14 +541,41 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         if self.cooldown > 0:
             return
 
+        if self.meta_wait_count > 0:
+            return
+
         if mode_name == "DRAWDOWN":
             return
 
         if mode_name == "TOP_CHOP" and (not self.p.allow_entry_in_top_chop):
             return
 
+        # TOP_CHOP区间引擎：仅允许轻仓试错
+        if mode_name == "TOP_CHOP":
+            if active_engine != "RANGE_ENGINE" or (not self.p.allow_entry_in_top_chop):
+                return
+            if float(d.close[0]) <= float(self.ema20[0]):
+                return
+            if getattr(d, "vol_ratio")[0] < max(0.7, float(self.p.swing_vol_ratio_min)):
+                return
+
+            env = self._market_environment_snapshot()
+            if env["is_weak"]:
+                return
+
+            self.tranche = 0
+            advice = self._meta_advice(mode_id, "RANGE_PROBE", mode_name)
+            if not advice["allow"]:
+                return
+            range_ratio = min(float(self.p.probe_ratio), float(self.p.tranche_targets[0]))
+            self.pos_mgr.scale_to(range_ratio * float(advice["size_multiplier"]), "区间引擎试探仓", mode_name, "RANGE_PROBE")
+            return
+
         # BASE_BUILD试探仓
         if mode_name == "BASE_BUILD":
+            if active_engine != "RECOVERY_ENGINE":
+                return
+
             if self.base_probe_counter > 0:
                 return
 
@@ -432,18 +584,26 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
             if getattr(d, "vol_ratio")[0] < 1.0:
                 return
 
+            env = self._market_environment_snapshot()
+            if env["is_weak"]:
+                return
+
             self.tranche = 0
             self.pb_touched = False
             self.profit_taken = False
             self.base_pyramid_count = 0
             self.base_probe_counter = self.p.base_probe_cooldown
-            if not self._allow_by_meta_filter(mode_id, "PROBE"):
+            advice = self._meta_advice(mode_id, "PROBE", mode_name)
+            if not advice["allow"]:
                 return
-            self.pos_mgr.scale_to(float(self.p.probe_ratio), "BASE试探仓", mode_name, "PROBE")
+            self.pos_mgr.scale_to(float(self.p.probe_ratio) * float(advice["size_multiplier"]), "BASE试探仓", mode_name, "PROBE")
             return
 
         # TREND_RUN首仓
         if mode_name == "TREND_RUN":
+            if active_engine != "TREND_ENGINE":
+                return
+
             if self.p.require_main_uptrend and getattr(d, "is_main_uptrend")[0] < 1:
                 return
 
@@ -455,6 +615,10 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
             if not (is_breakout_entry or is_swing_entry):
                 return
 
+            env = self._market_environment_snapshot()
+            if env["is_weak"]:
+                return
+
             self.tranche = 1
             self.pb_touched = False
             self.profit_taken = False
@@ -463,9 +627,10 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
             entry_tag = "TRANCHE1" if is_breakout_entry else "SWING1"
             entry_reason = "第1档突破首仓" if is_breakout_entry else "波段回踩反弹首仓"
 
-            if not self._allow_by_meta_filter(mode_id, entry_tag):
+            advice = self._meta_advice(mode_id, entry_tag, mode_name)
+            if not advice["allow"]:
                 return
-            self.pos_mgr.scale_to(self.p.tranche_targets[0], entry_reason, mode_name, entry_tag)
+            self.pos_mgr.scale_to(float(self.p.tranche_targets[0]) * float(advice["size_multiplier"]), entry_reason, mode_name, entry_tag)
             return
 
     def notify_order(self, order):
@@ -473,6 +638,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
             if order.status == order.Completed and order.issell():
                 self._consume_exit_for_meta()
                 if self.position.size == 0:
+                    self._apply_exit_cooldown()
                     self._reset_state()
             self.order = None
 

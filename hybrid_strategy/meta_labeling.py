@@ -115,11 +115,19 @@ class MetaLabelingFilter:
         self,
         model: Optional[BaseMetaModel] = None,
         prob_threshold: float = 0.53,
+        reject_threshold: float = 0.30,
+        probe_threshold: float = 0.50,
+        half_threshold: float = 0.65,
+        wait_bars_on_reject: int = 2,
         min_samples: int = 40,
         retrain_interval: int = 10,
     ):
         self.model = model or LogisticMetaModel()
         self.prob_threshold = float(prob_threshold)
+        self.reject_threshold = float(reject_threshold)
+        self.probe_threshold = float(probe_threshold)
+        self.half_threshold = float(half_threshold)
+        self.wait_bars_on_reject = int(wait_bars_on_reject)
         self.min_samples = int(min_samples)
         self.retrain_interval = int(retrain_interval)
 
@@ -160,6 +168,64 @@ class MetaLabelingFilter:
 
         proba = float(self.model.predict_proba(x_norm)[0])
         return bool(proba >= self.prob_threshold), proba
+
+    def advise_signal(self, feature: List[float], threshold_shift: float = 0.0) -> dict:
+        """Meta 2.0 决策顾问：是否做、做多大、是否等待。"""
+        allowed, proba = self.allow_signal(feature)
+        if len(self._labels) < self.min_samples:
+            return {
+                "allow": True,
+                "size_multiplier": 1.0,
+                "wait_bars": 0,
+                "proba": proba,
+                "tier": "WARMUP",
+            }
+
+        reject_th = min(max(self.reject_threshold + threshold_shift, 0.0), 1.0)
+        probe_th = min(max(self.probe_threshold + threshold_shift, reject_th), 1.0)
+        half_th = min(max(self.half_threshold + threshold_shift, probe_th), 1.0)
+        full_th = min(max(self.prob_threshold + threshold_shift, half_th), 1.0)
+
+        if proba < reject_th:
+            return {
+                "allow": False,
+                "size_multiplier": 0.0,
+                "wait_bars": self.wait_bars_on_reject,
+                "proba": proba,
+                "tier": "REJECT",
+            }
+        if proba < probe_th:
+            return {
+                "allow": True,
+                "size_multiplier": 0.25,
+                "wait_bars": 0,
+                "proba": proba,
+                "tier": "PROBE_ONLY",
+            }
+        if proba < half_th:
+            return {
+                "allow": True,
+                "size_multiplier": 0.5,
+                "wait_bars": 0,
+                "proba": proba,
+                "tier": "HALF_SIZE",
+            }
+        if proba < full_th:
+            return {
+                "allow": True,
+                "size_multiplier": 0.75,
+                "wait_bars": 0,
+                "proba": proba,
+                "tier": "THREE_QUARTER",
+            }
+
+        return {
+            "allow": bool(allowed),
+            "size_multiplier": 1.0,
+            "wait_bars": 0,
+            "proba": proba,
+            "tier": "FULL",
+        }
 
 
 class TradeMetaRecorder:
