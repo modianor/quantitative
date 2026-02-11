@@ -498,6 +498,14 @@ class ExitManager:
             return float(mode_mult)
         return float(self.p.swing_chand_atr_mult) if self._is_swing_profile() else float(self.p.chand_atr_mult)
 
+    def _in_burst_guard(self, mode_name: str) -> bool:
+        """放量急拉后的保护期：避免过早被噪声回撤洗出。"""
+        if mode_name != "TREND_RUN":
+            return False
+        if not self.strat.position:
+            return False
+        return int(getattr(self.strat, "breakout_guard_remaining", 0)) > 0
+
     def check_stop_loss(self, mode_name: str) -> bool:
         """票型差异化止损（带盘中模拟）"""
         if not self.strat.position:
@@ -594,6 +602,12 @@ class ExitManager:
         if pnl_pct < trigger:
             return False
 
+        if self._in_burst_guard(mode_name) and bool(getattr(self.p, "burst_disable_break_even", True)):
+            self.strat.log(
+                f"[{mode_name}] 趋势保护期中，跳过保本止损 (剩余{int(getattr(self.strat, 'breakout_guard_remaining', 0))} bars)"
+            )
+            return False
+
         peak = max(float(getattr(self.strat, "entry_peak_price", close)), close)
         self.strat.entry_peak_price = peak
 
@@ -677,12 +691,16 @@ class ExitManager:
         hh_chand = float(self.strat.hh_chand[0])
 
         # 先用常规Chandelier，若从持仓峰值回撤超阈值，则切到更紧的ATR倍数
+        in_burst_guard = self._in_burst_guard(mode_name)
         active_mult = self._chand_mult_by_mode(mode_name)
+        if in_burst_guard:
+            active_mult += float(getattr(self.p, "burst_chand_mult_bonus", 0.6))
+
         peak = max(float(getattr(self.strat, "entry_peak_price", close)), close)
         self.strat.entry_peak_price = peak
         peak_drawdown_pct = (close / max(peak, 1e-9) - 1.0) * 100.0
         fast_dd_threshold = float(getattr(self.p, "fast_exit_drawdown_pct", 5.0))
-        if peak_drawdown_pct <= -fast_dd_threshold:
+        if (not in_burst_guard) and peak_drawdown_pct <= -fast_dd_threshold:
             active_mult = min(active_mult, float(getattr(self.p, "fast_chand_atr_mult", 1.9)))
 
         chand_line = hh_chand - active_mult * atrv
@@ -692,7 +710,11 @@ class ExitManager:
         trigger_desc = f"Close=${close:.2f}"
 
         # 日线回测中用当日最低价近似5分钟风控触发，减少“日内破位但收盘拉回”导致的迟钝。
-        if bool(getattr(self.p, "chand_use_intraday_low", True)):
+        use_intraday_low = bool(getattr(self.p, "chand_use_intraday_low", True))
+        if in_burst_guard and bool(getattr(self.p, "burst_disable_intraday_chand", True)):
+            use_intraday_low = False
+
+        if use_intraday_low:
             low_today = float(self.strat.data.low[0])
             if low_today < chand_line:
                 trigger_price = low_today
