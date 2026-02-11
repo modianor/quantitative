@@ -21,6 +21,12 @@ from .advanced_models import (
     DeflatedSharpeRatio,
     RiskParityAllocator,
 )
+from .signals import OnlineSignalCalculator
+from .hmm_regime import GaussianHMM, RegimeDetectorHMM
+from .meta_label import MetaLabeler, AdaptiveMetaThreshold
+from .risk_manager import RealisticSlippageModel, VolatilityTargeting, KellyPositionSizer, RiskParity, DrawdownController
+from .statistical_tests import PerformanceTests
+from .main_strategy_v2 import ProductionStrategy
 from .backtest import plot_mode_report, run_backtest, batch_backtest, CONFIG_LOADED
 from .walk_forward import walk_forward_validation
 
@@ -49,6 +55,18 @@ __all__ = [
     "RealizedVolatilityEstimator",
     "DeflatedSharpeRatio",
     "RiskParityAllocator",
+    "OnlineSignalCalculator",
+    "GaussianHMM",
+    "RegimeDetectorHMM",
+    "MetaLabeler",
+    "AdaptiveMetaThreshold",
+    "RealisticSlippageModel",
+    "VolatilityTargeting",
+    "KellyPositionSizer",
+    "RiskParity",
+    "DrawdownController",
+    "PerformanceTests",
+    "ProductionStrategy",
     "plot_mode_report",
     "run_backtest",
     "batch_backtest",
