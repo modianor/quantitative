@@ -34,9 +34,62 @@ def plot_mode_report(strat, symbol=""):
     equity = pd.Series(strat.rec_equity, index=dates)
     mode = pd.Series(strat.rec_regime, index=dates)
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
+    # 回测曲线收益（累计收益率）
+    equity_ret = equity / max(float(equity.iloc[0]), 1e-9) - 1.0
 
-    ax1.plot(close.index, close.values, label="Close", color='black', linewidth=1)
+    fig, (ax1, ax2) = plt.subplots(
+        2,
+        1,
+        figsize=(15, 10),
+        sharex=True,
+        gridspec_kw={"height_ratios": [3, 1]},
+    )
+
+    # K线可视化（简版）：使用recorded close近似 open，并绘制高低影线
+    kline_index = close.index
+    kline_open = close.shift(1).fillna(close)
+    kline_close = close
+    kline_high = pd.concat([kline_open, kline_close], axis=1).max(axis=1)
+    kline_low = pd.concat([kline_open, kline_close], axis=1).min(axis=1)
+
+    up_mask = kline_close >= kline_open
+    down_mask = ~up_mask
+
+    ax1.vlines(
+        kline_index,
+        kline_low,
+        kline_high,
+        color=np.where(up_mask, "#2ca02c", "#d62728"),
+        alpha=0.6,
+        linewidth=1.0,
+        zorder=1,
+    )
+    body_bottom = np.minimum(kline_open.values, kline_close.values)
+    body_height = np.maximum(np.abs((kline_close - kline_open).values), 1e-6)
+    candle_width = 0.6
+
+    ax1.bar(
+        kline_index[up_mask],
+        body_height[up_mask],
+        bottom=body_bottom[up_mask],
+        width=candle_width,
+        color="#2ca02c",
+        edgecolor="#2ca02c",
+        alpha=0.6,
+        label="K线(涨)",
+        zorder=2,
+    )
+    ax1.bar(
+        kline_index[down_mask],
+        body_height[down_mask],
+        bottom=body_bottom[down_mask],
+        width=candle_width,
+        color="#d62728",
+        edgecolor="#d62728",
+        alpha=0.6,
+        label="K线(跌)",
+        zorder=2,
+    )
 
     colors = {0: 'green', 1: 'orange', 2: 'red', 3: 'blue'}
     labels = {0: 'TREND_RUN', 1: 'TOP_CHOP', 2: 'DRAWDOWN', 3: 'BASE_BUILD'}
@@ -63,6 +116,8 @@ def plot_mode_report(strat, symbol=""):
         ("SELL", "PROFIT_TAKE"): ("v", "gold", "PROFIT"),
         ("SELL", "REGIME_CUT"): ("v", "orange", "REGIME"),
         ("SELL", "CHANDELIER"): ("v", "red", "CHAND"),
+        ("SELL", "INTRADAY_STOP"): ("v", "purple", "I-STOP"),
+        ("SELL", "BREAK_EVEN"): ("v", "brown", "B-EVEN"),
     }
 
     groups = {}
@@ -80,9 +135,47 @@ def plot_mode_report(strat, symbol=""):
         mk, color, lbl = cfg
         ax1.scatter(xy["x"], xy["y"], marker=mk, color=color, s=80, label=lbl, zorder=5)
 
-    ax1.set_title(f"{symbol} Price + Mode + Trades (v2.1 票型差异化)")
-    ax1.set_xlabel("Date")
+    ax1.set_title(f"{symbol} K线 + 市场模式 + 买卖点")
     ax1.set_ylabel("Price")
+    ax1.legend(loc="upper left", ncol=4, fontsize=9)
+
+    ax2.plot(equity.index, equity.values, color="#1f77b4", label="Equity", linewidth=1.5)
+    ax2_twin = ax2.twinx()
+    ax2_twin.plot(equity_ret.index, equity_ret.values * 100, color="#ff7f0e", label="Return(%)", linewidth=1.2)
+    ax2.set_ylabel("Equity")
+    ax2_twin.set_ylabel("Return %")
+    ax2.grid(alpha=0.25)
+
+    h1, l1 = ax2.get_legend_handles_labels()
+    h2, l2 = ax2_twin.get_legend_handles_labels()
+    ax2.legend(h1 + h2, l1 + l2, loc="upper left")
+
+    plt.tight_layout()
+    plt.show()
+
+
+def _print_identified_summary(strat):
+    """打印策略识别信息（市场模式 + 买卖点）。"""
+    if strat is None:
+        return
+
+    mode_series = pd.Series(strat.rec_mode_name)
+    mode_counts = mode_series.value_counts().to_dict()
+
+    print("\n🧠 识别到的市场模式统计:")
+    for name in ["TREND_RUN", "TOP_CHOP", "DRAWDOWN", "BASE_BUILD"]:
+        print(f"  - {name:<10}: {mode_counts.get(name, 0)} bars")
+
+    print("\n📝 识别到的交易信号（前30条）:")
+    if not strat.trade_marks:
+        print("  - 无买卖点信号")
+        return
+
+    for i, (dt, price, side, mode_name, tag) in enumerate(strat.trade_marks[:30], start=1):
+        print(f"  {i:>2}. {dt} | {side:<4} | {mode_name:<10} | {tag:<12} @ {price:.2f}")
+
+    if len(strat.trade_marks) > 30:
+        print(f"  ... 共 {len(strat.trade_marks)} 条，以上仅展示前30条")
 
 
 # =============================
@@ -96,7 +189,9 @@ def run_backtest(
         commission=0.0008,
         slippage=0.0005,
         custom_params=None,
-        show_config=True
+        show_config=True,
+        show_plot=True,
+        print_identified=True,
 ):
     """运行单标的回测。
 
@@ -109,6 +204,8 @@ def run_backtest(
         slippage: 成交滑点比例（例如 ``0.0005`` 表示 0.05%）。
         custom_params: 策略参数覆盖项，优先级最高。
         show_config: 是否打印 ``stock_configs.py`` 中的股票配置信息。
+        show_plot: 是否绘制“K线+买卖点+收益”图。
+        print_identified: 是否打印识别到的市场模式与交易信号。
 
     Returns:
         tuple[strategy, pandas.DataFrame]:
@@ -304,6 +401,12 @@ def run_backtest(
     print(f"总交易次数: {total_closed} | 盈利: {won} | 亏损: {lost} | 胜率: {winrate:.2f}%")
     print(f"净盈亏: ${pnl_net:.2f} | 盈亏比: {profit_factor:.2f}")
     print("=" * 60 + "\n")
+
+    if print_identified:
+        _print_identified_summary(strat)
+
+    if show_plot:
+        plot_mode_report(strat, symbol=symbol)
 
     return strat, df2
 
