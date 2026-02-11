@@ -7,57 +7,133 @@ from .managers import RegimeDetector, HMMRegimeDetector, PositionManager, ExitMa
 from .meta_labeling import MetaLabelingFilter, TradeMetaRecorder
 
 class OptimizedHybrid4ModeV2(bt.Strategy):
+    """四阶段自适应策略。
+
+    参数说明（均可通过 ``run_backtest(custom_params=...)`` 覆盖）：
+    - 仓位控制：``max_exposure``、``tranche_targets``、``probe_ratio``。
+    - 波动率目标：``use_vol_targeting`` 与 ``target_vol_annual`` 等。
+    - 入场信号：``breakout_n``、``vol_ratio_min``、``ema_pullback`` 等。
+    - 出场信号：``stop_loss_pct``、``profit_take_pct``、``chand_atr_mult``。
+    - 市场状态机：``use_hmm_regime`` 及 ``hmm_*`` 参数。
+    - 元标签过滤：``use_meta_labeling`` 及 ``meta_*`` 参数。
+    """
     params = dict(
+        # ===== 1) 总体仓位/风险预算 =====
+        # 账户最大持仓比例（例如 0.60 表示最多 60% 资金在场内）
         max_exposure=0.60,
+        # 是否开启波动率目标仓位缩放（波动高时自动降仓）
         use_vol_targeting=True,
+        # 年化目标波动率（仅在 use_vol_targeting=True 时生效）
         target_vol_annual=0.20,
+        # 估算近期波动率所用窗口（bar 数）
         vol_lookback=20,
+        # 年化波动下限，避免“低波动导致过度放大仓位”
         vol_floor_annual=0.10,
+        # 年化波动上限，避免极端行情下缩放异常
         vol_cap_annual=0.80,
+        # 波动率缩放因子最小值（最低保留仓位系数）
         min_vol_scalar=0.30,
+        # 波动率缩放因子最大值（最高仓位系数）
         max_vol_scalar=1.00,
+        # TREND_RUN 模式下三段加仓目标（占 max_exposure 的比例）
         tranche_targets=(0.30, 0.60, 1.00),
+        # BASE_BUILD 探针仓位比例（用于试错小仓位）
         probe_ratio=0.15,
+
+        # ===== 2) 入场相关参数 =====
+        # 突破入场窗口（收盘价创新高 N 日）
         breakout_n=20,
+        # 主升浪入场最低量比要求（VOL_RATIO >= 该值）
         vol_ratio_min=1.2,
+        # 回踩 EMA 周期（用于“突破后回踩确认”）
         ema_pullback=20,
+        # 回踩允许偏离 ATR 带宽
         pullback_atr_band=1.0,
+        # 回踩后是否需要“反弹确认”再入场
         rebound_confirm=True,
+        # 加仓突破窗口（通常短于首次突破）
         add_breakout_n=10,
+        # 加仓量比要求（可低于首仓）
         add_vol_ratio_min=1.0,
+        # 入场后可容忍回撤（超过可能减仓/退出）
         drawdown_tolerance=0.08,
+
+        # ===== 3) 出场相关参数 =====
+        # Chandelier Exit 最高价回看窗口
         chand_period=22,
+        # Chandelier ATR 倍数（越大越“宽松”）
         chand_atr_mult=2.8,
+        # ATR 指标周期
         atr_period=14,
+        # 硬止损阈值（百分比），例如 8.0 表示 -8% 止损
         stop_loss_pct=8.0,
+        # 分批止盈阈值（百分比）
         profit_take_pct=30.0,
+
+        # ===== 4) 模式识别/切换参数 =====
+        # 最低可交易 K 线数量（确保 EMA200 等长周期指标稳定）
         min_bars_required=210,
+        # 票型/阶段判断回看窗口
         stage_lookback=60,
+        # 趋势斜率计算窗口
         slope_win=10,
+        # 高位震荡区阈值（相对高点回撤）
         high_zone_dd_th=-0.10,
+        # 高位震荡所需最少“横盘天数/交叉次数”
         cross_top_min=12,
+        # ATR 收缩阈值（识别波动收敛）
         atr_shrink_ratio=0.7,
+        # DRAWDOWN 区判定：回撤阈值
         dd_drawdown_th=-0.18,
+        # DRAWDOWN 区判定：波动率阈值
         atrp_drawdown_th=0.09,
+        # BASE_BUILD 区判定：深回撤阈值
         base_zone_dd_th=-0.35,
+        # BASE_BUILD 区判定：ATR 百分比阈值
         base_atrp_th=0.09,
+        # BASE 结构识别窗口（高低点结构）
         base_hl_win=20,
+        # BASE 结构识别位移
         base_hl_shift=10,
+        # BASE 结构连续成立次数
         base_hl_consecutive=3,
+        # BASE 探针加仓冷却（bar）
         base_probe_cooldown=10,
+        # BASE 模式金字塔加仓最低盈利门槛（百分比）
         base_pyramid_profit_th=5.0,
+        # 平仓后冷却 bar 数，避免频繁反复交易
         cooldown_bars=3,
+
+        # ===== 5) 交易开关 =====
+        # 是否仅在“主升浪信号”为真时允许入场
         require_main_uptrend=True,
+        # 是否允许在 TOP_CHOP 模式尝试入场
         allow_entry_in_top_chop=False,
+
+        # ===== 6) HMM Regime 参数 =====
+        # 是否启用 HMM 市场状态识别（False 则使用规则引擎）
         use_hmm_regime=True,
+        # HMM 热身样本数（不足时自动回退规则引擎）
         hmm_warmup_bars=240,
+        # HMM 切换所需最低置信度
         hmm_min_confidence=0.45,
+        # HMM 状态切换缓冲天数（防抖）
         hmm_mode_buffer_days=2,
+
+        # ===== 7) Meta Labeling 参数 =====
+        # 是否启用元标签过滤器（过滤低质量入场信号）
         use_meta_labeling=True,
+        # 通过信号的最低胜率概率阈值
         meta_prob_threshold=0.53,
+        # 训练前最少样本数
         meta_min_samples=40,
+        # 模型重训练间隔（每 N 笔样本）
         meta_retrain_interval=10,
+
+        # ===== 8) 其他 =====
+        # 是否打印详细日志
         print_log=False,
+        # 交易起始日期（早于该日期仅观察不下单）
         trade_start_date=None,
     )
 

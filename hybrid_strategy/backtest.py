@@ -97,13 +97,22 @@ def run_backtest(
         custom_params=None,
         show_config=True
 ):
-    """
-    运行回测
+    """运行单标的回测。
 
-    参数:
-        symbol: 股票代码
-        custom_params: 自定义参数（覆盖配置文件）
-        show_config: 是否显示配置信息
+    Args:
+        symbol: 股票代码，例如 ``"NVDA"``。
+        use_yfinance: ``True`` 时从 Yahoo Finance 拉取数据；否则读取本地 CSV。
+        csv_path: 本地 CSV 文件路径，仅 ``use_yfinance=False`` 时使用。
+        cash: 初始资金（美元）。
+        commission: 单边手续费比例（例如 ``0.0008`` 表示 0.08%）。
+        slippage: 成交滑点比例（例如 ``0.0005`` 表示 0.05%）。
+        custom_params: 策略参数覆盖项，优先级最高。
+        show_config: 是否打印 ``stock_configs.py`` 中的股票配置信息。
+
+    Returns:
+        tuple[strategy, pandas.DataFrame]:
+            - strategy: 回测完成后的策略实例。
+            - DataFrame: 追加信号列后的行情数据。
     """
     # 1. 加载股票配置
     if CONFIG_LOADED:
@@ -273,13 +282,16 @@ def run_backtest(
 # 批量回测工具
 # =============================
 def batch_backtest(symbols=None, tier=None, show_details=False):
-    """
-    批量回测多个股票
+    """批量回测多个股票。
 
-    参数:
-        symbols: 股票列表，如 ["NVDA", "AAPL"]
-        tier: 按评级筛选，如 "S" 表示只测试Tier S
-        show_details: 是否显示详细日志
+    Args:
+        symbols: 显式指定股票列表，如 ``["NVDA", "AAPL"]``。
+            若提供该参数，则忽略 ``tier``。
+        tier: 按评级筛选股票，如 ``"S"`` 仅回测 Tier S。
+        show_details: 是否展示每只股票回测过程日志。
+
+    Returns:
+        list[dict]: 每个元素包含 ``symbol/return/win_rate/profit_factor/max_dd/trades``。
     """
     if not CONFIG_LOADED:
         print("❌ 未加载stock_configs.py，无法批量回测")
