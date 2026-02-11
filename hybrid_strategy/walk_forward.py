@@ -12,13 +12,8 @@ import pandas as pd
 import backtrader as bt
 
 from .data_utils import load_from_yfinance, detect_main_uptrend, PandasWithSignals
-from .backtest import _validate_backtest_data, CONFIG_LOADED
+from .backtest import _validate_backtest_data
 from .strategy import OptimizedHybrid4ModeV2
-
-try:
-    from stock_configs import get_stock_config
-except ImportError:  # pragma: no cover
-    get_stock_config = None
 
 
 @dataclass
@@ -40,18 +35,14 @@ class FoldResult:
 
 
 def _default_params(symbol: str) -> Dict[str, float]:
-    params = {
+    _ = symbol
+    return {
         "stop_loss_pct": 10.0,
         "profit_take_pct": 25.0,
         "vol_ratio_min": 1.2,
         "chand_atr_mult": 2.8,
         "dd_drawdown_th": -0.18,
     }
-    if CONFIG_LOADED and get_stock_config:
-        cfg = get_stock_config(symbol)
-        if cfg.get("status") == "approved":
-            params.update(cfg.get("params", {}))
-    return params
 
 
 def _activity_profile_overrides(profile: str) -> Dict[str, float]:

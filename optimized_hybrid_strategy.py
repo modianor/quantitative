@@ -1,16 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-优化版四阶段自适应策略 v2.2 - 独立配置文件版
+优化版四阶段自适应策略 v2.3 - 全自适应学习版
 核心改进：
-1. 每个股票独立配置文件，方便管理
-2. 自动加载stock_configs.py
-3. 高波动成长股：禁用止损，只用Chandelier趋势跟踪
-4. 低波动大盘股：严格止损 + 快速止盈
-5. 垃圾股/困境股：黑名单（不交易）
+1. 移除手工股票配置文件
+2. 参数由策略在运行中在线学习优化
+3. 维持统一入口，支持单票和批量回测
 """
 
 from hybrid_strategy import (
-    CONFIG_LOADED,
     PandasWithSignals,
     RegimeDetector,
     PositionManager,
