@@ -132,6 +132,22 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         base_hl_shift=10,
         # BASE 结构连续成立次数
         base_hl_consecutive=2,
+        # 是否启用“人眼K线形态”辅助判断（震荡 / 回撤中继）
+        use_kline_pattern_inference=True,
+        # K线形态识别回看窗口
+        kline_pattern_lookback=18,
+        # 震荡判定：窗口净涨跌幅绝对值上限（百分比）
+        kline_chop_net_move_max=0.03,
+        # 震荡判定：收盘涨跌方向翻转比例下限
+        kline_chop_flip_ratio_min=0.55,
+        # 震荡判定：窗口振幅上限（百分比）
+        kline_chop_range_max=0.12,
+        # 回撤中继判定：相对窗口高点最小回撤（负数）
+        kline_pullback_min_dd=-0.12,
+        # 回撤中继判定：相对窗口高点最大回撤（负数）
+        kline_pullback_max_dd=-0.03,
+        # 回撤中继判定：窗口整体仍需保持最小涨幅
+        kline_pullback_net_up_min=0.05,
         # BASE 探针加仓冷却（bar）
         base_probe_cooldown=6,
         # BASE 模式金字塔加仓最低盈利门槛（百分比）
