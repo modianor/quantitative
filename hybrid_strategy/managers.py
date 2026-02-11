@@ -478,6 +478,9 @@ class ExitManager:
         bias = str(getattr(self.strat, "current_market_bias", "NEUTRAL"))
         return profile == "SWING_CHOP" or bias == "SWING_CHOP"
 
+    def _is_high_vol_stock(self) -> bool:
+        return bool(getattr(self.strat, "is_high_vol_stock", lambda: False)())
+
     def _stop_loss_by_mode(self, mode_name: str) -> float:
         per_mode = {
             "TREND_RUN": getattr(self.p, "stop_loss_trend_pct", None),
@@ -532,12 +535,20 @@ class ExitManager:
     def check_stop_loss(self, mode_name: str) -> bool:
         """票型差异化止损（带盘中模拟）"""
         if not self.strat.position:
+            self.strat.stop_intraday_breach_count = 0
+            self.strat.stop_close_breach_count = 0
             return False
 
         active_stop_loss = self._stop_loss_by_mode(mode_name)
+        high_vol_relax = self._is_high_vol_stock()
+        if high_vol_relax:
+            widen = max(float(getattr(self.p, "high_vol_stop_loss_widen_pct", 0.0)), 0.0)
+            active_stop_loss += widen
 
         # 高波动票：禁用止损（stop_loss_pct >= 999）
         if active_stop_loss >= 999:
+            self.strat.stop_intraday_breach_count = 0
+            self.strat.stop_close_breach_count = 0
             return False
 
         close = float(self.strat.data.close[0])
@@ -553,11 +564,32 @@ class ExitManager:
         # 计算盘中最低点盈亏（模拟最坏情况）
         pnl_intraday_low = (low_today / cost - 1.0) * 100
 
+        intraday_enabled = True
+        if high_vol_relax and not bool(getattr(self.p, "high_vol_intraday_stop_enabled", False)):
+            intraday_enabled = False
+
+        intraday_buffer = 0.0
+        if high_vol_relax:
+            intraday_buffer = max(float(getattr(self.p, "high_vol_intraday_stop_buffer_pct", 0.0)), 0.0)
+        intraday_stop_threshold = active_stop_loss + intraday_buffer
+
+        confirm_bars = 1
+        if high_vol_relax:
+            confirm_bars = max(int(getattr(self.p, "high_vol_stop_confirm_bars", 1)), 1)
+
         # 如果盘中最低点触发止损
-        if pnl_intraday_low <= -active_stop_loss:
+        if intraday_enabled and pnl_intraday_low <= -intraday_stop_threshold:
+            self.strat.stop_intraday_breach_count = int(getattr(self.strat, "stop_intraday_breach_count", 0)) + 1
+            if self.strat.stop_intraday_breach_count < confirm_bars:
+                self.strat.log(
+                    f"[{mode_name}] 盘中止损预警(等待确认) {self.strat.stop_intraday_breach_count}/{confirm_bars} "
+                    f"| 最低={pnl_intraday_low:.2f}% 阈值=-{intraday_stop_threshold:.2f}%"
+                )
+                return False
+
             participation = min(max(pos_size / max(float(self.strat.broker.getvalue()), 1.0), 0.001), 0.25)
             ann_vol = self.pos_mgr._annualized_volatility()
-            stop_price = cost * (1 - active_stop_loss / 100)
+            stop_price = cost * (1 - intraday_stop_threshold / 100)
             estimated_exit_price = self.slippage_model.apply_to_price(
                 stop_price,
                 side="SELL",
@@ -572,6 +604,8 @@ class ExitManager:
             dt = self.strat.data.datetime.date(0)
             self.strat.trade_marks.append((dt, estimated_exit_price, "SELL", mode_name, "INTRADAY_STOP"))
             self._mark_exit("INTRADAY_STOP", estimated_exit_price, reason="NOISE")
+            self.strat.stop_intraday_breach_count = 0
+            self.strat.stop_close_breach_count = 0
 
             # 预估卖出后状态
             cash_gain = pos_size * close  # 实际按收盘价成交
@@ -582,11 +616,22 @@ class ExitManager:
 
         # 正常收盘止损
         elif pnl_close <= -active_stop_loss:
+            self.strat.stop_close_breach_count = int(getattr(self.strat, "stop_close_breach_count", 0)) + 1
+            if self.strat.stop_close_breach_count < confirm_bars:
+                self.strat.log(
+                    f"[{mode_name}] 收盘止损预警(等待确认) {self.strat.stop_close_breach_count}/{confirm_bars} "
+                    f"| 收盘={pnl_close:.2f}% 阈值=-{active_stop_loss:.2f}%"
+                )
+                self.strat.stop_intraday_breach_count = 0
+                return False
+
             self.strat.log(f"[{mode_name}] 收盘止损触发 PnL={pnl_close:.2f}% 阈值=-{active_stop_loss:.2f}%")
             self.strat.order = self.strat.close()
             dt = self.strat.data.datetime.date(0)
             self.strat.trade_marks.append((dt, close, "SELL", mode_name, "STOP_LOSS"))
             self._mark_exit("STOP_LOSS", close, reason="NOISE")
+            self.strat.stop_intraday_breach_count = 0
+            self.strat.stop_close_breach_count = 0
 
             # 预估卖出后状态
             cash_gain = pos_size * close
@@ -594,6 +639,9 @@ class ExitManager:
                            f"总资产: ${self.strat.broker.getvalue():,.0f}")
 
             return True
+
+        self.strat.stop_intraday_breach_count = 0
+        self.strat.stop_close_breach_count = 0
 
         return False
 
@@ -719,17 +767,25 @@ class ExitManager:
 
         # 先用常规Chandelier，若从持仓峰值回撤超阈值，则切到更紧的ATR倍数
         in_burst_guard = self._in_burst_guard(mode_name)
+        high_vol_relax = self._is_high_vol_stock()
         active_mult = self._chand_mult_by_mode(mode_name)
         active_mult = self._apply_dynamic_chand_mult(active_mult, close=close, atrv=atrv)
         if in_burst_guard:
             active_mult += float(getattr(self.p, "burst_chand_mult_bonus", 0.6))
+        if high_vol_relax:
+            active_mult += float(getattr(self.p, "high_vol_chand_mult_bonus", 0.30))
 
         peak = max(float(getattr(self.strat, "entry_peak_price", close)), close)
         self.strat.entry_peak_price = peak
         peak_drawdown_pct = (close / max(peak, 1e-9) - 1.0) * 100.0
         fast_dd_threshold = float(getattr(self.p, "fast_exit_drawdown_pct", 5.0))
+        if high_vol_relax:
+            fast_dd_threshold += max(float(getattr(self.p, "high_vol_fast_exit_dd_bonus", 1.5)), 0.0)
         if (not in_burst_guard) and peak_drawdown_pct <= -fast_dd_threshold:
-            active_mult = min(active_mult, float(getattr(self.p, "fast_chand_atr_mult", 1.9)))
+            fast_mult = float(getattr(self.p, "fast_chand_atr_mult", 1.9))
+            if high_vol_relax:
+                fast_mult += max(float(getattr(self.p, "high_vol_fast_chand_floor_bonus", 0.25)), 0.0)
+            active_mult = min(active_mult, fast_mult)
 
         chand_line = hh_chand - active_mult * atrv
 
@@ -740,6 +796,8 @@ class ExitManager:
         # 日线回测中用当日最低价近似5分钟风控触发，减少“日内破位但收盘拉回”导致的迟钝。
         use_intraday_low = bool(getattr(self.p, "chand_use_intraday_low", True))
         if in_burst_guard and bool(getattr(self.p, "burst_disable_intraday_chand", True)):
+            use_intraday_low = False
+        if high_vol_relax and bool(getattr(self.p, "high_vol_disable_intraday_chand", True)):
             use_intraday_low = False
 
         if use_intraday_low:
