@@ -245,7 +245,8 @@ class HMMRegimeDetector(TransitionAdaptiveHMMMixin):
         filtered = self._forward_filter(features)
         mode_id = max(range(4), key=lambda i: filtered[i])
         confidence = float(filtered[mode_id])
-        confidence_min = float(getattr(self.p, "hmm_min_confidence", 0.45))
+        base_conf = float(getattr(self.p, "hmm_min_confidence", 0.45))
+        confidence_min = float(getattr(self.strat, "get_adaptive_param", lambda n, v: v)("hmm_min_confidence", base_conf))
 
         # 置信度不足时，回退到规则状态机
         if confidence < confidence_min:
@@ -365,17 +366,20 @@ class PositionManager:
     def _effective_exposure(self, ratio: float) -> float:
         # 兼容旧逻辑：关闭波动目标时仍是固定仓位比例
         if not bool(getattr(self.p, "use_vol_targeting", True)):
-            return min(max(float(self.p.max_exposure) * ratio, 0.0), 1.0)
+            base_exposure = float(getattr(self.strat, "get_adaptive_param", lambda n, v: v)("max_exposure", float(self.p.max_exposure)))
+            return min(max(base_exposure * ratio, 0.0), 1.0)
 
         annual_vol = self._annualized_volatility()
-        target_vol = max(float(getattr(self.p, "target_vol_annual", 0.20)), 1e-6)
+        base_target_vol = float(getattr(self.p, "target_vol_annual", 0.20))
+        target_vol = max(float(getattr(self.strat, "get_adaptive_param", lambda n, v: v)("target_vol_annual", base_target_vol)), 1e-6)
         vol_scalar = target_vol / annual_vol
 
         min_scalar = float(getattr(self.p, "min_vol_scalar", 0.30))
         max_scalar = float(getattr(self.p, "max_vol_scalar", 1.00))
         vol_scalar = min(max(vol_scalar, min_scalar), max_scalar)
 
-        exposure = float(self.p.max_exposure) * ratio * vol_scalar
+        max_exposure = float(getattr(self.strat, "get_adaptive_param", lambda n, v: v)("max_exposure", float(self.p.max_exposure)))
+        exposure = max_exposure * ratio * vol_scalar
         return min(max(exposure, 0.0), 1.0)
 
     def _annualized_volatility(self) -> float:
@@ -484,7 +488,10 @@ class ExitManager:
         mode_stop = per_mode.get(mode_name)
         if mode_stop is not None:
             return float(mode_stop)
-        return float(self.p.swing_stop_loss_pct) if self._is_swing_profile() else float(self.p.stop_loss_pct)
+        if self._is_swing_profile():
+            return float(self.p.swing_stop_loss_pct)
+        base_stop = float(self.p.stop_loss_pct)
+        return float(getattr(self.strat, "get_adaptive_param", lambda n, v: v)("stop_loss_pct", base_stop))
 
     def _chand_mult_by_mode(self, mode_name: str) -> float:
         per_mode = {
@@ -641,7 +648,11 @@ class ExitManager:
         pos_size = int(self.strat.position.size)
 
         is_swing = self._is_swing_profile()
-        target_pct = float(self.p.swing_profit_take_pct) if is_swing else float(self.p.profit_take_pct)
+        if is_swing:
+            target_pct = float(self.p.swing_profit_take_pct)
+        else:
+            base_pt = float(self.p.profit_take_pct)
+            target_pct = float(getattr(self.strat, "get_adaptive_param", lambda n, v: v)("profit_take_pct", base_pt))
 
         if pnl_pct < target_pct:
             return False

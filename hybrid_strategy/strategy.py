@@ -5,6 +5,7 @@ import backtrader as bt
 
 from .managers import RegimeDetector, HMMRegimeDetector, PositionManager, ExitManager
 from .meta_labeling import MetaLabelingFilter, TradeMetaRecorder
+from .adaptive_profile import StockProfileLearner
 
 class OptimizedHybrid4ModeV2(bt.Strategy):
     """四阶段自适应策略。
@@ -256,6 +257,10 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         shadow_horizons=(5, 10, 20),
 
         # ===== 10) 其他 =====
+        adaptive_profile_enabled=True,
+        adaptive_profile_lookback=80,
+        adaptive_high_vol_threshold=0.45,
+        adaptive_confidence_min=0.30,
         # 是否打印详细日志
         print_log=False,
         # 交易起始日期（早于该日期仅观察不下单）
@@ -325,6 +330,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         self.regime = HMMRegimeDetector(self, fallback_detector=self.rule_regime) if self.p.use_hmm_regime else self.rule_regime
         self.pos_mgr = PositionManager(self)
         self.exit_mgr = ExitManager(self)
+        self.profile_learner = StockProfileLearner(self)
 
         self.last_exit_tag = None
         self.last_exit_price = None
@@ -358,6 +364,12 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         self.trade_marks = []
         self.equity_peak = float(self.broker.getvalue())
 
+    def get_adaptive_param(self, name: str, base_value: float):
+        learner = getattr(self, "profile_learner", None)
+        if learner is None:
+            return float(base_value)
+        return float(learner.get_adjustment(name, float(base_value)))
+
     def _tsmom_snapshot(self) -> dict:
         if not bool(getattr(self.p, "use_tsmom_filter", True)):
             return {"pass_regime": True, "pass_trigger": True, "regime_return": 0.0, "trigger_return": 0.0}
@@ -388,7 +400,8 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         if mode_name != "TREND_RUN" or not bool(getattr(self.p, "use_hmm_regime", True)):
             return True
 
-        threshold = float(getattr(self.p, "hmm_trend_prob_threshold", 0.70))
+        base_threshold = float(getattr(self.p, "hmm_trend_prob_threshold", 0.70))
+        threshold = self.get_adaptive_param("hmm_trend_prob_threshold", base_threshold)
         if threshold <= 0:
             return True
 
@@ -516,13 +529,16 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         ema50 = float(self.ema50[0])
         ema200 = float(self.ema200[0])
 
+        archetype = getattr(getattr(self, "profile_learner", None), "archetype", "UNKNOWN")
+        stage = getattr(getattr(self, "profile_learner", None), "stage", "UNKNOWN")
+
         strong_trend = (
             mode_name == "TREND_RUN"
             and trend_score >= 4
             and mom_score >= 2
             and close > ema20 > ema50 > ema200
             and atrp <= float(self.p.trend_confidence_atrp_max)
-        )
+        ) or (archetype == "TREND_LEADER" and stage == "MARKUP")
         if strong_trend:
             return "MAIN_UPTREND"
 
@@ -531,6 +547,8 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
             or close <= ema20
             or ema20 <= ema50
             or trend_score <= float(self.p.swing_trend_score_min)
+            or archetype in {"RANGE_BOUND", "DISTRIBUTION"}
+            or stage in {"SIDEWAYS", "DISTRIBUTION", "MARKDOWN"}
         )
         if range_like:
             return "SWING_CHOP"
@@ -628,6 +646,9 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
     def next(self):
         d = self.datas[0]
         dt = d.datetime.date(0)
+
+        if hasattr(self, "profile_learner"):
+            self.profile_learner.update()
 
         mode_id, mode_name = self.regime.get_mode()
         active_engine = self._active_engine(mode_name)
@@ -763,7 +784,8 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
                 if getattr(d, "trend_score")[0] < 4:
                     return
 
-                if getattr(d, "vol_ratio")[0] >= float(self.p.add_vol_ratio_min):
+                add_vol_ratio_min = self.get_adaptive_param("add_vol_ratio_min", float(self.p.add_vol_ratio_min))
+                if getattr(d, "vol_ratio")[0] >= add_vol_ratio_min:
                     if close > float(self.hhv_add[-1]):
                         advice = self._meta_advice(mode_id, "TRANCHE3", mode_name)
                         if advice["allow"]:
@@ -855,7 +877,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
                 return
 
             is_breakout_entry = (
-                float(getattr(d, "vol_ratio")[0]) >= float(self.p.vol_ratio_min)
+                float(getattr(d, "vol_ratio")[0]) >= self.get_adaptive_param("vol_ratio_min", float(self.p.vol_ratio_min))
                 and float(d.close[0]) > float(self.hhv_entry[-1])
             )
             is_swing_entry = self._should_open_swing_entry(d)
