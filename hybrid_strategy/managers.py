@@ -477,6 +477,42 @@ class ExitManager:
 
         return False
 
+    def check_break_even(self, mode_name: str) -> bool:
+        """浮盈后保本退出，减少盈利回吐与小亏损累积。"""
+        if not self.strat.position:
+            return False
+
+        close = float(self.strat.data.close[0])
+        cost = float(self.strat.position.price)
+        pos_size = int(self.strat.position.size)
+
+        pnl_pct = (close / max(cost, 1e-9) - 1.0) * 100.0
+        trigger = float(getattr(self.p, "break_even_trigger_pct", 4.0))
+        if pnl_pct < trigger:
+            return False
+
+        peak = max(float(getattr(self.strat, "entry_peak_price", close)), close)
+        self.strat.entry_peak_price = peak
+
+        buffer_pct = float(getattr(self.p, "break_even_buffer_pct", 0.2))
+        break_even_line = cost * (1.0 + buffer_pct / 100.0)
+
+        if close < break_even_line:
+            self.strat.log(
+                f"[{mode_name}] 保本止损触发 | 当前PnL={pnl_pct:.2f}% | 峰值价=${peak:.2f} | 保本线=${break_even_line:.2f}"
+            )
+            self.strat.order = self.strat.close()
+            dt = self.strat.data.datetime.date(0)
+            self.strat.trade_marks.append((dt, close, "SELL", mode_name, "BREAK_EVEN"))
+            self._mark_exit("BREAK_EVEN", close)
+
+            cash_gain = pos_size * close
+            self.strat.log(f"   → 预估现金: ${self.strat.broker.cash + cash_gain:,.0f} | "
+                           f"总资产: ${self.strat.broker.getvalue():,.0f}")
+            return True
+
+        return False
+
     def check_profit_taking(self, mode_name: str) -> bool:
         """分批止盈"""
         if not self.strat.position or self.strat.tranche < 3:
