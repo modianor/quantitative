@@ -21,11 +21,11 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
     params = dict(
         # ===== 1) 总体仓位/风险预算 =====
         # 账户最大持仓比例（例如 0.60 表示最多 60% 资金在场内）
-        max_exposure=0.60,
+        max_exposure=0.75,
         # 是否开启波动率目标仓位缩放（波动高时自动降仓）
         use_vol_targeting=True,
         # 年化目标波动率（仅在 use_vol_targeting=True 时生效）
-        target_vol_annual=0.20,
+        target_vol_annual=0.24,
         # 估算近期波动率所用窗口（bar 数）
         vol_lookback=20,
         # 年化波动下限，避免“低波动导致过度放大仓位”
@@ -35,7 +35,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         # 波动率缩放因子最小值（最低保留仓位系数）
         min_vol_scalar=0.30,
         # 波动率缩放因子最大值（最高仓位系数）
-        max_vol_scalar=1.00,
+        max_vol_scalar=1.15,
         # Realized volatility估计方法："close" 或 "parkinson"
         realized_vol_method="close",
         # TREND_RUN 模式下三段加仓目标（占 max_exposure 的比例）
@@ -47,7 +47,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         # 突破入场窗口（收盘价创新高 N 日）
         breakout_n=20,
         # 主升浪入场最低量比要求（VOL_RATIO >= 该值）
-        vol_ratio_min=1.0,
+        vol_ratio_min=0.9,
         # 回踩 EMA 周期（用于“突破后回踩确认”）
         ema_pullback=20,
         # 回踩允许偏离 ATR 带宽
@@ -57,16 +57,16 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         # 加仓突破窗口（通常短于首次突破）
         add_breakout_n=10,
         # 加仓量比要求（可低于首仓）
-        add_vol_ratio_min=0.85,
+        add_vol_ratio_min=0.75,
         # 波段回踩入场最低量比（低于突破入场）
         swing_vol_ratio_min=0.75,
         # 波段回踩入场要求的最低趋势分
         swing_trend_score_min=3,
         # 成交量z-score门槛：过滤无量试探单
-        entry_vol_zscore_min=0.5,
+        entry_vol_zscore_min=0.2,
         # 趋势质量阈值：用于加仓过滤
-        trend_quality_min_tranche2=0.60,
-        trend_quality_min_tranche3=0.72,
+        trend_quality_min_tranche2=0.55,
+        trend_quality_min_tranche3=0.66,
         # 第2档回踩确认所需连续收盘天数
         tranche2_confirm_bars=2,
         # 波段回踩识别窗口（bar）
@@ -96,7 +96,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         # 硬止损阈值（百分比），例如 8.0 表示 -8% 止损
         stop_loss_pct=8.0,
         # 分批止盈阈值（百分比）
-        profit_take_pct=30.0,
+        profit_take_pct=36.0,
         # 浮盈达到阈值后将止损抬升至保本（百分比）
         break_even_trigger_pct=4.0,
         # 保本线缓冲（百分比，防止过早扫损）
@@ -214,7 +214,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         # HMM 切换所需最低置信度
         hmm_min_confidence=0.38,
         # 若启用HMM，TREND_RUN开仓/加仓要求的最小趋势后验概率
-        hmm_trend_prob_threshold=0.70,
+        hmm_trend_prob_threshold=0.64,
         # HMM 状态切换缓冲天数（防抖）
         hmm_mode_buffer_days=1,
         # 是否按市场后验动态更新HMM转移概率
@@ -226,7 +226,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         # 是否启用元标签过滤器（过滤低质量入场信号）
         use_meta_labeling=True,
         # 通过信号的最低胜率概率阈值
-        meta_prob_threshold=0.48,
+        meta_prob_threshold=0.44,
         # Meta 2.0 分层决策阈值
         meta_reject_threshold=0.30,
         meta_probe_threshold=0.50,
@@ -242,9 +242,9 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         # 动态阈值：按市场状态自动放松/收紧过滤（负值=更容易放行）
         meta_dynamic_shift_enabled=True,
         # 全局基础偏移：默认略微降低过滤强度
-        meta_base_shift=-0.03,
+        meta_base_shift=-0.05,
         # 主升浪环境放松幅度（提高上涨期弹性）
-        meta_shift_uptrend_bonus=-0.04,
+        meta_shift_uptrend_bonus=-0.06,
         # 回撤放大惩罚（继续控回撤）
         meta_shift_drawdown_penalty=0.08,
         # 波动过高惩罚（避免噪声期过度交易）
