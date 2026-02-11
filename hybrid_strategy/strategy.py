@@ -87,6 +87,18 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         break_even_trigger_pct=4.0,
         # 保本线缓冲（百分比，防止过早扫损）
         break_even_buffer_pct=0.2,
+        # 放量急拉后的“趋势保护期”（bar），保护期内放宽出场避免过早卖飞
+        burst_guard_bars=4,
+        # 触发趋势保护期的最低量比
+        burst_vol_ratio_min=1.8,
+        # 触发趋势保护期的最低实体强度（|close-open| / ATR）
+        burst_body_atr_min=1.0,
+        # 趋势保护期中对Chandelier附加放宽（ATR倍数）
+        burst_chand_mult_bonus=0.6,
+        # 趋势保护期内是否禁用“盘中最低价触发Chandelier”
+        burst_disable_intraday_chand=True,
+        # 趋势保护期内是否禁用保本止损
+        burst_disable_break_even=True,
         # 震荡/波段单独参数：见好就收 + 更紧止损
         swing_stop_loss_pct=6.0,
         swing_profit_take_pct=10.0,
@@ -307,6 +319,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         self.entry_peak_price = 0.0
         self.entry_profile = "NEUTRAL"
         self.current_market_bias = "NEUTRAL"
+        self.breakout_guard_remaining = 0
 
         self.rule_regime = RegimeDetector(self)
         self.regime = HMMRegimeDetector(self, fallback_detector=self.rule_regime) if self.p.use_hmm_regime else self.rule_regime
@@ -634,6 +647,9 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         if self.cooldown > 0:
             self.cooldown -= 1
 
+        if self.position and self.breakout_guard_remaining > 0:
+            self.breakout_guard_remaining -= 1
+
         if self.base_probe_counter > 0:
             self.base_probe_counter -= 1
 
@@ -855,6 +871,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
             self.profit_taken = False
             self.base_pyramid_count = 0
             self.entry_peak_price = float(d.close[0])
+            self.breakout_guard_remaining = 0
             entry_tag = "TRANCHE1" if is_breakout_entry else "SWING1"
             entry_reason = "第1档突破首仓" if is_breakout_entry else "波段回踩反弹首仓"
 
@@ -865,6 +882,16 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
             if self.current_market_bias == "MAIN_UPTREND" and is_breakout_entry:
                 base_ratio = min(base_ratio * float(self.p.trend_aggressive_scale), float(self.p.tranche_targets[1]))
             self.entry_profile = self.current_market_bias if is_breakout_entry else "SWING_CHOP"
+
+            if is_breakout_entry:
+                body_strength = abs(float(d.close[0]) - float(d.open[0])) / max(float(self.atr[0]), 1e-9)
+                vol_ratio = float(getattr(d, "vol_ratio")[0])
+                if (
+                    vol_ratio >= float(getattr(self.p, "burst_vol_ratio_min", 1.8))
+                    and body_strength >= float(getattr(self.p, "burst_body_atr_min", 1.0))
+                ):
+                    self.breakout_guard_remaining = int(max(getattr(self.p, "burst_guard_bars", 0), 0))
+
             self.pos_mgr.scale_to(base_ratio * float(advice["size_multiplier"]), entry_reason, mode_name, entry_tag)
             return
 
@@ -884,6 +911,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         self.base_pyramid_count = 0
         self.entry_peak_price = 0.0
         self.entry_profile = "NEUTRAL"
+        self.breakout_guard_remaining = 0
 
     def _should_open_swing_entry(self, d) -> bool:
         if len(self) < int(self.p.swing_pullback_lookback) + 3:
