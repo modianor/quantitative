@@ -261,6 +261,14 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         adaptive_profile_lookback=80,
         adaptive_high_vol_threshold=0.45,
         adaptive_confidence_min=0.30,
+        adaptive_state_persist_enabled=True,
+        adaptive_state_dir=".adaptive_state",
+        adaptive_state_version="1",
+        adaptive_global_weight=0.60,
+        adaptive_stock_weight=0.40,
+        adaptive_learning_decay=0.995,
+        adaptive_learning_count_decay=0.99,
+        adaptive_save_on_trade=False,
         # 是否打印详细日志
         print_log=False,
         # 交易起始日期（早于该日期仅观察不下单）
@@ -942,7 +950,14 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         if float(trade.price) > 0:
             pnl_pct = float(trade.pnlcomm) / float(trade.price) * 100.0
         learner.observe_trade(pnl_pct=pnl_pct, context=self.entry_context)
+        if bool(getattr(self.p, "adaptive_save_on_trade", False)):
+            learner.save_state()
         self.entry_context = None
+
+    def stop(self):
+        learner = getattr(self, "profile_learner", None)
+        if learner is not None:
+            learner.save_state()
 
     def _reset_state(self):
         self.tranche = 0

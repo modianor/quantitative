@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import math
+import json
+from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 
@@ -18,9 +21,12 @@ class StockProfileLearner:
         self.confidence = 0.0
         self.last_update_len = -1
         self.metrics: Dict[str, float] = {}
-        # 在线学习状态：每个(票型, 阶段, 参数)都维护一组可学习偏移量。
+        self.symbol = self._resolve_symbol()
+        # 全局在线学习状态：每个(票型, 阶段, 参数)都维护一组可学习偏移量。
+        # 个股在线学习状态：每个(股票, 阶段, 参数)都维护一组可学习偏移量。
         # value 表示相对基础参数的偏移（mul型表示比例偏移，add型表示绝对偏移）。
-        self.learned_state: Dict[Tuple[str, str, str], Dict[str, float]] = {}
+        self.learned_state_global: Dict[Tuple[str, str, str], Dict[str, float]] = {}
+        self.learned_state_stock: Dict[Tuple[str, str, str], Dict[str, float]] = {}
         self.param_meta: Dict[str, Dict[str, float | str]] = {
             "vol_ratio_min": {"op": "add", "lr": 0.04, "floor": -0.35, "cap": 0.35},
             "add_vol_ratio_min": {"op": "add", "lr": 0.04, "floor": -0.30, "cap": 0.40},
@@ -33,6 +39,96 @@ class StockProfileLearner:
             "chand_atr_mult": {"op": "mul", "lr": 0.04, "floor": -0.25, "cap": 0.25},
             "breakout_n": {"op": "mul", "lr": 0.03, "floor": -0.50, "cap": 0.80},
         }
+        self.load_state()
+
+    def _resolve_symbol(self) -> str:
+        d = self.strat.datas[0] if self.strat.datas else None
+        if d is None:
+            return "UNKNOWN"
+        for attr in ("_name", "_dataname"):
+            val = getattr(d, attr, None)
+            if isinstance(val, str) and val.strip():
+                return val.strip().upper()
+        return "UNKNOWN"
+
+    @staticmethod
+    def _encode_key(key: Tuple[str, str, str]) -> str:
+        return "||".join(key)
+
+    @staticmethod
+    def _decode_key(key: str) -> Tuple[str, str, str]:
+        parts = key.split("||")
+        if len(parts) != 3:
+            raise ValueError(f"invalid state key: {key}")
+        return parts[0], parts[1], parts[2]
+
+    def _state_storage_dir(self) -> Path:
+        raw = str(getattr(self.p, "adaptive_state_dir", ".adaptive_state"))
+        return Path(raw)
+
+    def _state_version(self) -> str:
+        return str(getattr(self.p, "adaptive_state_version", "1")).strip() or "1"
+
+    def _state_latest_path(self) -> Path:
+        return self._state_storage_dir() / "learned_state_latest.json"
+
+    def _state_payload(self) -> Dict[str, object]:
+        return {
+            "version": self._state_version(),
+            "saved_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "symbol": self.symbol,
+            "global": {self._encode_key(k): v for k, v in self.learned_state_global.items()},
+            "stock": {self._encode_key(k): v for k, v in self.learned_state_stock.items()},
+        }
+
+    def load_state(self) -> None:
+        if not bool(getattr(self.p, "adaptive_state_persist_enabled", True)):
+            return
+
+        latest = self._state_latest_path()
+        if not latest.exists():
+            return
+
+        try:
+            payload = json.loads(latest.read_text(encoding="utf-8"))
+        except Exception:
+            return
+
+        g = payload.get("global", {})
+        s = payload.get("stock", {})
+        if isinstance(g, dict):
+            for k, v in g.items():
+                if not isinstance(v, dict):
+                    continue
+                self.learned_state_global[self._decode_key(k)] = {
+                    "value": float(v.get("value", 0.0)),
+                    "count": float(v.get("count", 0.0)),
+                }
+        if isinstance(s, dict):
+            for k, v in s.items():
+                if not isinstance(v, dict):
+                    continue
+                decoded = self._decode_key(k)
+                if decoded[0] != self.symbol:
+                    continue
+                self.learned_state_stock[decoded] = {
+                    "value": float(v.get("value", 0.0)),
+                    "count": float(v.get("count", 0.0)),
+                }
+
+    def save_state(self) -> Optional[Path]:
+        if not bool(getattr(self.p, "adaptive_state_persist_enabled", True)):
+            return None
+
+        state_dir = self._state_storage_dir()
+        state_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
+        version = self._state_version()
+        snapshot = state_dir / f"learned_state_v{version}_{ts}.json"
+        payload = self._state_payload()
+        snapshot.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._state_latest_path().write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return snapshot
 
     def update(self) -> None:
         if not bool(getattr(self.p, "adaptive_profile_enabled", True)):
@@ -295,12 +391,15 @@ class StockProfileLearner:
     def context_key(self) -> Tuple[str, str]:
         return self.archetype, self.stage
 
-    def _state_for(self, context: Tuple[str, str], param_name: str) -> Dict[str, float]:
-        key = (context[0], context[1], param_name)
-        st = self.learned_state.get(key)
+    @staticmethod
+    def _state_for(
+        state_map: Dict[Tuple[str, str, str], Dict[str, float]],
+        key: Tuple[str, str, str],
+    ) -> Dict[str, float]:
+        st = state_map.get(key)
         if st is None:
             st = {"value": 0.0, "count": 0.0}
-            self.learned_state[key] = st
+            state_map[key] = st
         return st
 
     def _heuristic_bias(self, param_name: str) -> float:
@@ -343,8 +442,16 @@ class StockProfileLearner:
         if not meta:
             return self._clip_param(param_name, float(base_value))
 
-        state = self._state_for(context, param_name)
-        learned = float(state.get("value", 0.0))
+        global_key = (context[0], context[1], param_name)
+        stock_key = (self.symbol, context[1], param_name)
+        global_state = self._state_for(self.learned_state_global, global_key)
+        stock_state = self._state_for(self.learned_state_stock, stock_key)
+        global_bias = float(global_state.get("value", 0.0))
+        stock_bias = float(stock_state.get("value", 0.0))
+        gw = float(getattr(self.p, "adaptive_global_weight", 0.60))
+        sw = float(getattr(self.p, "adaptive_stock_weight", 0.40))
+        total_w = max(gw + sw, 1e-9)
+        learned = (gw / total_w) * global_bias + (sw / total_w) * stock_bias
         heuristic = self._heuristic_bias(param_name)
         signal = (0.65 * heuristic + 0.35 * learned) * conf
 
@@ -363,15 +470,23 @@ class StockProfileLearner:
         # reward压缩到[-1, 1]，提升稳健性
         reward = math.tanh(float(pnl_pct) / 8.0)
         conf = max(0.15, float(self.confidence))
+        decay = float(getattr(self.p, "adaptive_learning_decay", 0.995))
+        count_decay = float(getattr(self.p, "adaptive_learning_count_decay", 0.99))
         for param_name, meta in self.param_meta.items():
-            st = self._state_for(context, param_name)
-            n = float(st.get("count", 0.0))
-            lr = float(meta.get("lr", 0.03)) / (1.0 + 0.05 * n)
-            updated = float(st.get("value", 0.0)) + lr * reward * conf
             lo = float(meta.get("floor", -1.0))
             hi = float(meta.get("cap", 1.0))
-            st["value"] = min(max(updated, lo), hi)
-            st["count"] = n + 1.0
+            keys = [
+                (self.learned_state_global, (context[0], context[1], param_name)),
+                (self.learned_state_stock, (self.symbol, context[1], param_name)),
+            ]
+            for state_map, key in keys:
+                st = self._state_for(state_map, key)
+                prev = float(st.get("value", 0.0)) * decay
+                n = float(st.get("count", 0.0)) * count_decay
+                lr = float(meta.get("lr", 0.03)) / (1.0 + 0.05 * n)
+                updated = prev + lr * reward * conf
+                st["value"] = min(max(updated, lo), hi)
+                st["count"] = n + 1.0
 
     @staticmethod
     def _clip_param(param_name: str, value: float) -> float:
