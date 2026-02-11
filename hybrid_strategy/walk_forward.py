@@ -14,6 +14,7 @@ import backtrader as bt
 from .data_utils import load_from_yfinance, detect_main_uptrend, PandasWithSignals
 from .backtest import _validate_backtest_data
 from .strategy import OptimizedHybrid4ModeV2
+from .stats_utils import sharpe_significance_test
 
 
 @dataclass
@@ -29,6 +30,7 @@ class FoldResult:
     test_return: float
     test_max_dd: float
     test_sharpe: float
+    test_sharpe_pvalue: float
     trades: int
     win_rate: float
     best_params: Dict[str, float]
@@ -120,8 +122,9 @@ def _run_slice_backtest(
 
     cerebro = bt.Cerebro()
     cerebro.broker.setcash(cash)
-    cerebro.broker.setcommission(commission=0.0008)
-    cerebro.broker.set_slippage_perc(0.0005)
+    # 使用更保守、贴近实盘的一侧成本：手续费0.15% + 滑点0.15%
+    cerebro.broker.setcommission(commission=0.0015)
+    cerebro.broker.set_slippage_perc(0.0015)
 
     data = PandasWithSignals(dataname=df)
     cerebro.adddata(data)
@@ -132,6 +135,7 @@ def _run_slice_backtest(
     cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Days, compression=1)
     cerebro.addanalyzer(bt.analyzers.DrawDown, _name="dd")
     cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
+    cerebro.addanalyzer(bt.analyzers.TimeReturn, _name="timereturn")
 
     strat = cerebro.run()[0]
 
@@ -140,6 +144,8 @@ def _run_slice_backtest(
     dd = strat.analyzers.dd.get_analysis().get("max", {}).get("drawdown", 0.0)
     sharpe = strat.analyzers.sharpe.get_analysis().get("sharperatio")
     sharpe = float(sharpe) if sharpe is not None else 0.0
+    daily_returns = np.asarray(list(strat.analyzers.timereturn.get_analysis().values()), dtype=float)
+    _, sharpe_pvalue = sharpe_significance_test(daily_returns)
 
     trades = strat.analyzers.trades.get_analysis()
     total_closed = trades.get("total", {}).get("closed", 0)
@@ -150,6 +156,7 @@ def _run_slice_backtest(
         "return": total_return,
         "max_dd": dd,
         "sharpe": sharpe,
+        "sharpe_pvalue": sharpe_pvalue,
         "trades": total_closed,
         "win_rate": win_rate,
     }
@@ -323,6 +330,7 @@ def walk_forward_validation(
                 test_return=test_metrics["return"],
                 test_max_dd=test_metrics["max_dd"],
                 test_sharpe=test_metrics["sharpe"],
+                test_sharpe_pvalue=test_metrics["sharpe_pvalue"],
                 trades=int(test_metrics["trades"]),
                 win_rate=test_metrics["win_rate"],
                 best_params={
@@ -337,7 +345,7 @@ def walk_forward_validation(
 
             print(
                 f"{fold.test_year}: OOS收益={fold.test_return:+.2f}% | 回撤={fold.test_max_dd:.2f}% | "
-                f"Sharpe={fold.test_sharpe:.3f} | 交易={fold.trades} | "
+                f"Sharpe={fold.test_sharpe:.3f}(p={fold.test_sharpe_pvalue:.4f}) | 交易={fold.trades} | "
                 f"ValScore={fold.val_best_score:.2f} | TrainScore={fold.train_best_score:.2f}"
             )
 
@@ -359,6 +367,7 @@ def _print_summary(results: List[FoldResult], target_years: List[int]):
         avg_return=("test_return", "mean"),
         avg_dd=("test_max_dd", "mean"),
         avg_sharpe=("test_sharpe", "mean"),
+        avg_sharpe_p=("test_sharpe_pvalue", "mean"),
         avg_trades=("trades", "mean"),
         folds=("symbol", "count"),
     )
@@ -367,7 +376,7 @@ def _print_summary(results: List[FoldResult], target_years: List[int]):
     for _, row in grouped.iterrows():
         print(
             f"{int(row['test_year'])}: 平均OOS收益={row['avg_return']:.2f}% | 平均回撤={row['avg_dd']:.2f}% | "
-            f"平均Sharpe={row['avg_sharpe']:.3f} | 平均交易={row['avg_trades']:.1f} | 样本={int(row['folds'])}"
+            f"平均Sharpe={row['avg_sharpe']:.3f} | 平均p值={row['avg_sharpe_p']:.4f} | 平均交易={row['avg_trades']:.1f} | 样本={int(row['folds'])}"
         )
 
     print("\n目标年份(>=15%)检查:")
