@@ -115,7 +115,7 @@ GOOGL_CONFIG = {
     "params": {
         "stop_loss_pct": 6.0,  # 严格止损
         "profit_take_pct": 20.0,  # 快速止盈
-        "vol_ratio_min": 1.3,  # 严格量能
+        "vol_ratio_min": 1.1,  # 放宽量能，增加触发机会
         "chand_atr_mult": 3.0,  # 宽松Chandelier
         "dd_drawdown_th": -0.15,
     },
@@ -135,7 +135,7 @@ GOOG_CONFIG = {
     "params": {
         "stop_loss_pct": 6.0,
         "profit_take_pct": 20.0,
-        "vol_ratio_min": 1.3,
+        "vol_ratio_min": 1.1,
         "chand_atr_mult": 3.0,
         "dd_drawdown_th": -0.15,
     },
@@ -155,7 +155,7 @@ ORCL_CONFIG = {
     "params": {
         "stop_loss_pct": 6.0,
         "profit_take_pct": 20.0,
-        "vol_ratio_min": 1.3,
+        "vol_ratio_min": 1.1,
         "chand_atr_mult": 3.0,
         "dd_drawdown_th": -0.15,
     },
@@ -196,7 +196,7 @@ AVGO_CONFIG = {
     "params": {
         "stop_loss_pct": 6.0,
         "profit_take_pct": 20.0,
-        "vol_ratio_min": 1.3,
+        "vol_ratio_min": 1.1,
         "chand_atr_mult": 3.0,
         "dd_drawdown_th": -0.15,
     },
@@ -402,13 +402,13 @@ def get_stock_config(symbol: str):
         "symbol": symbol,
         "category": "medium_vol",
         "params": {
-            "stop_loss_pct": 10.0,
-            "profit_take_pct": 25.0,
-            "vol_ratio_min": 1.2,
-            "chand_atr_mult": 2.8,
-            "dd_drawdown_th": -0.18,
+            "stop_loss_pct": 12.0,
+            "profit_take_pct": 30.0,
+            "vol_ratio_min": 1.0,
+            "chand_atr_mult": 3.0,
+            "dd_drawdown_th": -0.20,
         },
-        "notes": "未测试股票，使用默认MEDIUM_VOL配置"
+        "notes": "未测试股票，使用放宽版MEDIUM_VOL配置（提高交易频率）"
     }
 
 

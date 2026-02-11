@@ -46,7 +46,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         # 突破入场窗口（收盘价创新高 N 日）
         breakout_n=20,
         # 主升浪入场最低量比要求（VOL_RATIO >= 该值）
-        vol_ratio_min=1.2,
+        vol_ratio_min=1.0,
         # 回踩 EMA 周期（用于“突破后回踩确认”）
         ema_pullback=20,
         # 回踩允许偏离 ATR 带宽
@@ -56,7 +56,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         # 加仓突破窗口（通常短于首次突破）
         add_breakout_n=10,
         # 加仓量比要求（可低于首仓）
-        add_vol_ratio_min=1.0,
+        add_vol_ratio_min=0.85,
         # 入场后可容忍回撤（超过可能减仓/退出）
         drawdown_tolerance=0.08,
 
@@ -82,7 +82,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         # 高位震荡区阈值（相对高点回撤）
         high_zone_dd_th=-0.10,
         # 高位震荡所需最少“横盘天数/交叉次数”
-        cross_top_min=12,
+        cross_top_min=8,
         # ATR 收缩阈值（识别波动收敛）
         atr_shrink_ratio=0.7,
         # DRAWDOWN 区判定：回撤阈值
@@ -98,19 +98,19 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         # BASE 结构识别位移
         base_hl_shift=10,
         # BASE 结构连续成立次数
-        base_hl_consecutive=3,
+        base_hl_consecutive=2,
         # BASE 探针加仓冷却（bar）
-        base_probe_cooldown=10,
+        base_probe_cooldown=6,
         # BASE 模式金字塔加仓最低盈利门槛（百分比）
-        base_pyramid_profit_th=5.0,
+        base_pyramid_profit_th=3.0,
         # 平仓后冷却 bar 数，避免频繁反复交易
-        cooldown_bars=3,
+        cooldown_bars=1,
 
         # ===== 5) 交易开关 =====
         # 是否仅在“主升浪信号”为真时允许入场
-        require_main_uptrend=True,
+        require_main_uptrend=False,
         # 是否允许在 TOP_CHOP 模式尝试入场
-        allow_entry_in_top_chop=False,
+        allow_entry_in_top_chop=True,
 
         # ===== 6) HMM Regime 参数 =====
         # 是否启用 HMM 市场状态识别（False 则使用规则引擎）
@@ -118,9 +118,9 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         # HMM 热身样本数（不足时自动回退规则引擎）
         hmm_warmup_bars=240,
         # HMM 切换所需最低置信度
-        hmm_min_confidence=0.45,
+        hmm_min_confidence=0.38,
         # HMM 状态切换缓冲天数（防抖）
-        hmm_mode_buffer_days=2,
+        hmm_mode_buffer_days=1,
         # 是否按市场后验动态更新HMM转移概率
         hmm_dynamic_transition=True,
         # 动态转移矩阵更新速度
@@ -130,11 +130,11 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         # 是否启用元标签过滤器（过滤低质量入场信号）
         use_meta_labeling=True,
         # 通过信号的最低胜率概率阈值
-        meta_prob_threshold=0.53,
+        meta_prob_threshold=0.50,
         # 训练前最少样本数
-        meta_min_samples=40,
+        meta_min_samples=25,
         # 模型重训练间隔（每 N 笔样本）
-        meta_retrain_interval=10,
+        meta_retrain_interval=8,
         # 启用跨资产相对强弱特征（若数据中有benchmark_close）
         use_cross_asset_meta=True,
 

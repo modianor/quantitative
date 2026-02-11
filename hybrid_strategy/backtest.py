@@ -154,7 +154,7 @@ def run_backtest(
         df = load_from_csv(csv_path)
 
     # 3. 计算主升浪信号
-    df2 = detect_main_uptrend(df, vol_ratio_th=1.2, score_threshold=(4, 2, 2))
+    df2 = detect_main_uptrend(df, vol_ratio_th=1.0, score_threshold=(3, 2, 1))
 
     # 4. 准备feed
     df2["is_main_uptrend"] = df2["is_main_uptrend"].fillna(0).astype(int)
@@ -184,22 +184,29 @@ def run_backtest(
         max_vol_scalar=1.00,
         tranche_targets=(0.30, 0.60, 1.00),
         probe_ratio=0.15,
-        drawdown_tolerance=0.08,
+        drawdown_tolerance=0.10,
         stop_loss_pct=10.0,  # 默认值
         profit_take_pct=25.0,  # 默认值
         high_zone_dd_th=-0.10,
-        cross_top_min=12,
+        cross_top_min=8,
         atr_shrink_ratio=0.7,
         base_zone_dd_th=-0.35,
         base_atrp_th=0.09,
-        base_hl_consecutive=3,
-        base_probe_cooldown=10,
-        base_pyramid_profit_th=5.0,
-        require_main_uptrend=True,
+        base_hl_consecutive=2,
+        base_probe_cooldown=6,
+        base_pyramid_profit_th=3.0,
+        cooldown_bars=1,
+        add_vol_ratio_min=0.85,
+        require_main_uptrend=False,
+        allow_entry_in_top_chop=True,
         use_hmm_regime=True,
         hmm_warmup_bars=240,
-        hmm_min_confidence=0.45,
-        hmm_mode_buffer_days=2,
+        hmm_min_confidence=0.38,
+        hmm_mode_buffer_days=1,
+        use_meta_labeling=True,
+        meta_prob_threshold=0.50,
+        meta_min_samples=25,
+        meta_retrain_interval=8,
         print_log=True,
     )
 
