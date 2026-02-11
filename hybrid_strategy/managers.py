@@ -685,7 +685,7 @@ class ExitManager:
         close = float(self.strat.data.close[0])
         cost = float(self.strat.position.price)
         pos_size = int(self.strat.position.size)
-        pnl = (close / cost - 1.0) * 100
+        close_pnl = (close / cost - 1.0) * 100
 
         atrv = float(self.strat.atr[0])
         hh_chand = float(self.strat.hh_chand[0])
@@ -722,8 +722,10 @@ class ExitManager:
                 trigger_desc = f"Low=${low_today:.2f}"
 
         if trigger_price < chand_line:
+            trigger_pnl = (trigger_price / cost - 1.0) * 100
             self.strat.log(f"[{mode_name}] Chandelier Exit | {trigger_desc} < ${chand_line:.2f} | "
-                           f"mult={active_mult:.2f} | 峰值回撤{peak_drawdown_pct:.2f}% | 持仓盈亏{pnl:+.2f}%")
+                           f"mult={active_mult:.2f} | 峰值回撤{peak_drawdown_pct:.2f}% | "
+                           f"持仓盈亏(触发){trigger_pnl:+.2f}% | 持仓盈亏(收盘){close_pnl:+.2f}%")
             self.strat.order = self.strat.close()
             dt = self.strat.data.datetime.date(0)
             self.strat.trade_marks.append((dt, trigger_price, "SELL", mode_name, trigger_tag))
