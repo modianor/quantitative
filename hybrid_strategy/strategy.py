@@ -538,7 +538,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
             and mom_score >= 2
             and close > ema20 > ema50 > ema200
             and atrp <= float(self.p.trend_confidence_atrp_max)
-        ) or (archetype == "TREND_LEADER" and stage == "MARKUP")
+        ) or (archetype in {"TREND_LEADER", "HIGH_BETA_GROWTH"} and stage == "MARKUP")
         if strong_trend:
             return "MAIN_UPTREND"
 
@@ -547,8 +547,8 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
             or close <= ema20
             or ema20 <= ema50
             or trend_score <= float(self.p.swing_trend_score_min)
-            or archetype in {"RANGE_BOUND", "DISTRIBUTION"}
-            or stage in {"SIDEWAYS", "DISTRIBUTION", "MARKDOWN"}
+            or archetype in {"RANGE_BOUND", "DISTRIBUTION", "CHOPPY", "CYCLICAL"}
+            or stage in {"SIDEWAYS", "RANGE", "DISTRIBUTION", "MARKDOWN", "ACCUMULATION"}
         )
         if range_like:
             return "SWING_CHOP"
