@@ -4,10 +4,11 @@
 from __future__ import annotations
 
 import math
+from typing import Dict, List, Optional, Tuple
 
 
 class StockProfileLearner:
-    """根据近端行情学习股票结构类型与阶段，并输出参数偏移。"""
+    """根据行情学习股票结构类型、阶段，并输出参数自适应值。"""
 
     def __init__(self, strategy):
         self.strat = strategy
@@ -16,6 +17,45 @@ class StockProfileLearner:
         self.stage = "UNKNOWN"
         self.confidence = 0.0
         self.last_update_len = -1
+        self.metrics: Dict[str, float] = {}
+
+        # Layer 3: f(StockType, Regime) -> 参数映射（乘法/加法）
+        self.parameter_map: Dict[Tuple[str, str], Dict[str, Tuple[str, float]]] = {
+            ("HIGH_BETA_GROWTH", "MARKUP"): {
+                "target_vol_annual": ("mul", 1.25),
+                "chand_atr_mult": ("mul", 1.12),
+                "breakout_n": ("set", 10.0),
+                "max_exposure": ("mul", 1.10),
+            },
+            ("CYCLICAL", "RANGE"): {
+                "breakout_n": ("set", 999.0),  # 近似关闭突破逻辑
+                "profit_take_pct": ("set", 8.0),
+                "stop_loss_pct": ("set", 5.0),
+                "add_vol_ratio_min": ("mul", 1.15),
+            },
+            ("DEFENSIVE", "MARKUP"): {
+                "target_vol_annual": ("mul", 0.90),
+                "max_exposure": ("mul", 1.05),
+                "hmm_trend_prob_threshold": ("mul", 0.95),
+            },
+            ("CHOPPY", "DISTRIBUTION"): {
+                "max_exposure": ("mul", 0.78),
+                "hmm_min_confidence": ("add", 0.08),
+                "hmm_trend_prob_threshold": ("add", 0.06),
+                "profit_take_pct": ("mul", 0.86),
+                "stop_loss_pct": ("mul", 0.82),
+            },
+            ("HIGH_BETA_GROWTH", "MARKDOWN"): {
+                "max_exposure": ("mul", 0.72),
+                "target_vol_annual": ("mul", 0.85),
+                "hmm_min_confidence": ("add", 0.06),
+            },
+            ("DEFENSIVE", "ACCUMULATION"): {
+                "max_exposure": ("mul", 0.92),
+                "hmm_min_confidence": ("add", 0.04),
+                "add_vol_ratio_min": ("mul", 1.08),
+            },
+        }
 
     def update(self) -> None:
         if not bool(getattr(self.p, "adaptive_profile_enabled", True)):
@@ -26,8 +66,8 @@ class StockProfileLearner:
             return
 
         self.last_update_len = current_len
-        lookback = int(max(getattr(self.p, "adaptive_profile_lookback", 80), 20))
-        if current_len <= lookback + 2:
+        lookback = int(max(getattr(self.p, "adaptive_profile_lookback", 120), 60))
+        if current_len <= lookback + 5:
             return
 
         d = self.strat.datas[0]
@@ -40,83 +80,202 @@ class StockProfileLearner:
 
         returns = [closes[i] / closes[i - 1] - 1.0 for i in range(1, len(closes))]
         net = closes[-1] / closes[0] - 1.0
+
         annual_vol = self._annualized_vol(returns)
+        beta = self._estimate_beta(returns)
+        trend_slope_120 = self._slope(closes[-120:]) if len(closes) >= 120 else self._slope(closes)
+        trend_persistence = sum(1 for r in returns if r > 0) / max(len(returns), 1)
+        max_dd_mean = self._rolling_max_drawdown_mean(closes, window=30)
+        breakout_success = self._breakout_success_rate(closes, lookback=20, horizon=5, threshold=0.015)
 
         ema20 = float(self.strat.ema20[0])
         ema50 = float(self.strat.ema50[0])
         ema200 = float(self.strat.ema200[0])
-        slope20 = self._slope([float(self.strat.ema20[-i]) for i in range(min(20, len(self.strat.ema20)-1), -1, -1)])
+        slope20 = self._slope([
+            float(self.strat.ema20[-i]) for i in range(min(20, len(self.strat.ema20) - 1), -1, -1)
+        ])
 
-        flip_ratio = self._flip_ratio(returns)
-        true_range_pct = (max(highs) - min(lows)) / max(closes[-1], 1e-9)
+        atr_series = self._atr_series(highs, lows, closes)
+        atr30_recent = sum(atr_series[-30:]) / max(min(30, len(atr_series)), 1)
+        atr30_prev = sum(atr_series[-60:-30]) / max(min(30, len(atr_series[-60:-30])), 1) if len(atr_series) >= 60 else atr30_recent
+        atr_declining = atr30_recent <= atr30_prev * 0.92
+        range_compress = (max(highs[-30:]) - min(lows[-30:])) / max(closes[-1], 1e-9)
+
         avg_vol = sum(vols) / max(len(vols), 1)
         recent_vol = sum(vols[-10:]) / max(min(len(vols), 10), 1)
+        recent_vol_30 = sum(vols[-30:]) / max(min(len(vols), 30), 1)
+        prev_vol_30 = sum(vols[-60:-30]) / max(min(len(vols[-60:-30]), 30), 1) if len(vols) >= 60 else recent_vol_30
         volume_ratio = recent_vol / max(avg_vol, 1e-9)
+        volume_trend = recent_vol_30 / max(prev_vol_30, 1e-9)
 
-        trend_like = net > 0.08 and ema20 > ema50 > ema200 and slope20 > 0 and flip_ratio < 0.42
-        range_like = abs(net) < 0.05 and flip_ratio > 0.52 and true_range_pct < 0.22
-        markdown_like = net < -0.10 and ema20 < ema50 and slope20 < 0
-        volatile_like = annual_vol >= float(getattr(self.p, "adaptive_high_vol_threshold", 0.45))
+        self.metrics = {
+            "annual_vol": annual_vol,
+            "beta": beta,
+            "max_dd_mean": max_dd_mean,
+            "trend_slope_120": trend_slope_120,
+            "trend_persistence": trend_persistence,
+            "breakout_success": breakout_success,
+            "volume_ratio": volume_ratio,
+            "range_compress": range_compress,
+            "atr30_recent": atr30_recent,
+            "atr30_prev": atr30_prev,
+        }
 
-        if trend_like and not volatile_like:
-            self.archetype = "TREND_LEADER"
-        elif markdown_like and volume_ratio > 1.05:
-            self.archetype = "DISTRIBUTION"
-        elif range_like:
-            self.archetype = "RANGE_BOUND"
-        elif volatile_like:
-            self.archetype = "HIGH_BETA"
-        else:
-            self.archetype = "BALANCED"
+        self.archetype = self._classify_archetype(
+            annual_vol=annual_vol,
+            beta=beta,
+            trend_slope_120=trend_slope_120,
+            trend_persistence=trend_persistence,
+            breakout_success=breakout_success,
+            max_dd_mean=max_dd_mean,
+        )
+        self.stage = self._infer_stage(
+            net=net,
+            slope20=slope20,
+            ema20=ema20,
+            ema50=ema50,
+            ema200=ema200,
+            atr_declining=atr_declining,
+            range_compress=range_compress,
+            volume_trend=volume_trend,
+            breakout_success=breakout_success,
+        )
+        self.confidence = self._compute_confidence(
+            net=net,
+            annual_vol=annual_vol,
+            trend_persistence=trend_persistence,
+            breakout_success=breakout_success,
+            range_compress=range_compress,
+        )
 
-        self.stage = self._infer_stage(net, slope20, flip_ratio, volume_ratio, ema20, ema50)
-        self.confidence = self._compute_confidence(net, flip_ratio, annual_vol)
+    def _classify_archetype(
+        self,
+        annual_vol: float,
+        beta: float,
+        trend_slope_120: float,
+        trend_persistence: float,
+        breakout_success: float,
+        max_dd_mean: float,
+    ) -> str:
+        if annual_vol >= 0.38 and beta >= 1.2 and trend_slope_120 > 0 and trend_persistence >= 0.54:
+            return "HIGH_BETA_GROWTH"
+        if annual_vol >= 0.32 and abs(trend_slope_120) < 0.0012 and breakout_success < 0.40:
+            return "CYCLICAL"
+        if annual_vol <= 0.22 and max_dd_mean <= 0.10 and trend_persistence >= 0.50:
+            return "DEFENSIVE"
+        if abs(trend_slope_120) < 0.0010 and breakout_success <= 0.35:
+            return "CHOPPY"
+        return "BALANCED"
 
     def _infer_stage(
         self,
         net: float,
         slope20: float,
-        flip_ratio: float,
-        volume_ratio: float,
         ema20: float,
         ema50: float,
+        ema200: float,
+        atr_declining: bool,
+        range_compress: float,
+        volume_trend: float,
+        breakout_success: float,
     ) -> str:
-        if net < -0.10 and slope20 < 0:
-            return "MARKDOWN"
-        if abs(net) < 0.04 and flip_ratio > 0.50 and volume_ratio < 1.1:
-            return "BASE"
-        if net > 0.08 and slope20 > 0 and ema20 > ema50:
+        # Wyckoff风格阶段判断
+        if atr_declining and abs(slope20) < 0.0012 and range_compress < 0.10 and volume_trend <= 1.02:
+            return "ACCUMULATION"
+        if ema50 > ema200 and ema20 > ema50 and slope20 > 0 and net > 0.06 and volume_trend >= 1.03:
             return "MARKUP"
-        if flip_ratio > 0.55 and abs(net) <= 0.08:
-            return "SIDEWAYS"
-        if net > 0.05 and slope20 <= 0 and volume_ratio > 1.1:
+        if net > 0.04 and slope20 <= 0 and volume_trend < 0.98 and breakout_success < 0.45:
             return "DISTRIBUTION"
+        if ema20 < ema50 and slope20 < 0 and net < -0.08:
+            return "MARKDOWN"
+        if abs(net) <= 0.08 and range_compress < 0.16:
+            return "RANGE"
         return "TRANSITION"
 
     @staticmethod
-    def _annualized_vol(returns) -> float:
+    def _annualized_vol(returns: List[float]) -> float:
         if len(returns) < 2:
             return 0.0
         mean = sum(returns) / len(returns)
         var = sum((r - mean) ** 2 for r in returns) / max(len(returns) - 1, 1)
         return math.sqrt(max(var, 0.0)) * math.sqrt(252.0)
 
-    @staticmethod
-    def _flip_ratio(returns) -> float:
-        flips = 0
-        pairs = 0
-        for i in range(1, len(returns)):
-            p = returns[i - 1]
-            c = returns[i]
-            if abs(p) < 1e-8 or abs(c) < 1e-8:
-                continue
-            pairs += 1
-            if (p > 0 > c) or (p < 0 < c):
-                flips += 1
-        return flips / max(pairs, 1)
+    def _estimate_beta(self, stock_returns: List[float]) -> float:
+        d = self.strat.datas[0]
+        if not hasattr(d, "benchmark_close"):
+            return 1.0
+
+        lb = min(len(stock_returns), 120)
+        if lb < 20:
+            return 1.0
+
+        bench = [float(getattr(d, "benchmark_close")[-i]) for i in range(lb, -1, -1)]
+        if min(bench) <= 0:
+            return 1.0
+        bench_returns = [bench[i] / bench[i - 1] - 1.0 for i in range(1, len(bench))]
+        stock_slice = stock_returns[-len(bench_returns):]
+        if len(stock_slice) < 10 or len(stock_slice) != len(bench_returns):
+            return 1.0
+
+        s_mean = sum(stock_slice) / len(stock_slice)
+        b_mean = sum(bench_returns) / len(bench_returns)
+        cov = sum((s - s_mean) * (b - b_mean) for s, b in zip(stock_slice, bench_returns)) / max(len(stock_slice) - 1, 1)
+        b_var = sum((b - b_mean) ** 2 for b in bench_returns) / max(len(bench_returns) - 1, 1)
+        if b_var <= 1e-12:
+            return 1.0
+        return cov / b_var
 
     @staticmethod
-    def _slope(series) -> float:
+    def _rolling_max_drawdown_mean(closes: List[float], window: int = 30) -> float:
+        if len(closes) <= window + 1:
+            return 0.0
+        dds = []
+        for i in range(window, len(closes)):
+            seg = closes[i - window:i + 1]
+            peak = seg[0]
+            mdd = 0.0
+            for px in seg:
+                peak = max(peak, px)
+                mdd = max(mdd, 1.0 - px / max(peak, 1e-9))
+            dds.append(mdd)
+        return sum(dds) / max(len(dds), 1)
+
+    @staticmethod
+    def _breakout_success_rate(
+        closes: List[float],
+        lookback: int = 20,
+        horizon: int = 5,
+        threshold: float = 0.015,
+    ) -> float:
+        if len(closes) <= lookback + horizon + 2:
+            return 0.0
+        trials = 0
+        wins = 0
+        for i in range(lookback, len(closes) - horizon):
+            prev_high = max(closes[i - lookback:i])
+            if closes[i] >= prev_high:
+                trials += 1
+                fwd_ret = closes[i + horizon] / max(closes[i], 1e-9) - 1.0
+                if fwd_ret >= threshold:
+                    wins += 1
+        return wins / max(trials, 1)
+
+    @staticmethod
+    def _atr_series(highs: List[float], lows: List[float], closes: List[float]) -> List[float]:
+        if len(closes) < 2:
+            return []
+        tr_vals = []
+        for i in range(1, len(closes)):
+            tr = max(
+                highs[i] - lows[i],
+                abs(highs[i] - closes[i - 1]),
+                abs(lows[i] - closes[i - 1]),
+            )
+            tr_vals.append(tr / max(closes[i], 1e-9))
+        return tr_vals
+
+    @staticmethod
+    def _slope(series: List[float]) -> float:
         n = len(series)
         if n < 3:
             return 0.0
@@ -128,11 +287,47 @@ class StockProfileLearner:
             return 0.0
         return (num / den) / max(abs(y_mean), 1e-9)
 
-    def _compute_confidence(self, net: float, flip_ratio: float, annual_vol: float) -> float:
-        net_score = min(abs(net) / 0.15, 1.0)
-        stability = 1.0 - min(abs(flip_ratio - 0.5) / 0.5, 1.0)
+    @staticmethod
+    def _legacy_stage_alias(stage: str) -> str:
+        alias = {
+            "ACCUMULATION": "BASE",
+            "RANGE": "SIDEWAYS",
+            "MARKUP": "MARKUP",
+            "DISTRIBUTION": "DISTRIBUTION",
+            "MARKDOWN": "MARKDOWN",
+            "TRANSITION": "TRANSITION",
+        }
+        return alias.get(stage, stage)
+
+    def _compute_confidence(
+        self,
+        net: float,
+        annual_vol: float,
+        trend_persistence: float,
+        breakout_success: float,
+        range_compress: float,
+    ) -> float:
+        trend_score = min(abs(net) / 0.15, 1.0)
         vol_score = min(annual_vol / max(float(getattr(self.p, "adaptive_high_vol_threshold", 0.45)), 1e-6), 1.0)
-        return max(0.15, min(0.95, 0.45 * net_score + 0.35 * stability + 0.20 * vol_score))
+        persistence_score = 1.0 - min(abs(trend_persistence - 0.5) / 0.5, 1.0)
+        breakout_score = min(max(breakout_success, 0.0), 1.0)
+        compress_score = 1.0 - min(range_compress / 0.25, 1.0)
+        raw = 0.30 * trend_score + 0.20 * vol_score + 0.20 * persistence_score + 0.15 * breakout_score + 0.15 * compress_score
+        return max(0.15, min(0.95, raw))
+
+    def _apply_mapping(self, param_name: str, base_value: float) -> Optional[float]:
+        key = (self.archetype, self.stage)
+        rule = self.parameter_map.get(key, {}).get(param_name)
+        if not rule:
+            return None
+        op, x = rule
+        if op == "set":
+            return float(x)
+        if op == "mul":
+            return float(base_value) * float(x)
+        if op == "add":
+            return float(base_value) + float(x)
+        return None
 
     def get_adjustment(self, param_name: str, base_value: float) -> float:
         """返回参数自适应后的值。"""
@@ -143,50 +338,31 @@ class StockProfileLearner:
         if conf < float(getattr(self.p, "adaptive_confidence_min", 0.30)):
             return float(base_value)
 
-        value = float(base_value)
+        mapped = self._apply_mapping(param_name, float(base_value))
+        value = float(mapped) if mapped is not None else float(base_value)
 
+        # 兼容旧逻辑：在映射基础上做轻量微调
+        stage_alias = self._legacy_stage_alias(self.stage)
         if param_name == "vol_ratio_min":
-            if self.archetype in {"RANGE_BOUND", "DISTRIBUTION"}:
-                value += 0.15 * conf
-            elif self.archetype == "TREND_LEADER":
-                value -= 0.08 * conf
+            if self.archetype in {"CHOPPY", "CYCLICAL"}:
+                value += 0.12 * conf
+            elif self.archetype == "HIGH_BETA_GROWTH":
+                value -= 0.07 * conf
         elif param_name == "add_vol_ratio_min":
-            if self.stage in {"SIDEWAYS", "DISTRIBUTION"}:
-                value += 0.20 * conf
-            elif self.stage == "MARKUP":
-                value -= 0.05 * conf
+            if stage_alias in {"SIDEWAYS", "DISTRIBUTION"}:
+                value += 0.18 * conf
+            elif stage_alias == "MARKUP":
+                value -= 0.04 * conf
         elif param_name == "target_vol_annual":
-            if self.archetype == "TREND_LEADER" and self.stage == "MARKUP":
-                value *= 1.0 + 0.30 * conf
-            elif self.archetype in {"RANGE_BOUND", "DISTRIBUTION"}:
-                value *= 1.0 - 0.22 * conf
-            elif self.archetype == "HIGH_BETA":
-                value *= 1.0 - 0.10 * conf
+            if self.archetype == "HIGH_BETA_GROWTH" and self.stage == "MARKUP":
+                value *= 1.0 + 0.20 * conf
+            elif self.archetype in {"CHOPPY", "CYCLICAL"}:
+                value *= 1.0 - 0.18 * conf
         elif param_name == "max_exposure":
             if self.stage == "MARKUP":
-                value *= 1.0 + 0.20 * conf
+                value *= 1.0 + 0.15 * conf
             elif self.stage in {"MARKDOWN", "DISTRIBUTION"}:
-                value *= 1.0 - 0.25 * conf
-        elif param_name == "hmm_min_confidence":
-            if self.stage in {"SIDEWAYS", "DISTRIBUTION"}:
-                value += 0.08 * conf
-            elif self.stage == "MARKUP":
-                value -= 0.05 * conf
-        elif param_name == "hmm_trend_prob_threshold":
-            if self.stage == "MARKUP":
-                value -= 0.08 * conf
-            elif self.stage in {"SIDEWAYS", "DISTRIBUTION"}:
-                value += 0.10 * conf
-        elif param_name == "profit_take_pct":
-            if self.stage == "MARKUP":
-                value *= 1.0 + 0.12 * conf
-            elif self.stage in {"SIDEWAYS", "DISTRIBUTION"}:
-                value *= 1.0 - 0.18 * conf
-        elif param_name == "stop_loss_pct":
-            if self.stage == "MARKUP":
-                value *= 1.0 + 0.10 * conf
-            elif self.stage in {"MARKDOWN", "DISTRIBUTION"}:
-                value *= 1.0 - 0.12 * conf
+                value *= 1.0 - 0.22 * conf
 
         return self._clip_param(param_name, value)
 
@@ -201,6 +377,8 @@ class StockProfileLearner:
             "hmm_trend_prob_threshold": (0.45, 0.90),
             "profit_take_pct": (6.0, 60.0),
             "stop_loss_pct": (3.0, 20.0),
+            "chand_atr_mult": (1.2, 4.0),
+            "breakout_n": (5.0, 999.0),
         }
         lo, hi = bounds.get(param_name, (-1e12, 1e12))
         return min(max(float(value), lo), hi)
