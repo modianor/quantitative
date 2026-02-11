@@ -388,6 +388,9 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         self.shadow_trades = []
         self.shadow_completed = []
         self.recent_trade_results = deque(maxlen=max(int(getattr(self.p, "reentry_loss_lookback", 6)), 1))
+        # 仅在“新增平仓”后评估一次连续试错保护，避免在每个bar重复刷新冷却导致长期冻结
+        self.closed_trade_count = 0
+        self.reentry_guard_last_applied_trade_count = -1
 
         self.meta_filter = MetaLabelingFilter(
             prob_threshold=float(self.p.meta_prob_threshold),
@@ -742,6 +745,10 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         if mode_name != "TREND_RUN":
             return False
 
+        # 未产生新的平仓结果时，不重复触发同一轮保护，避免cooldown被每根K线重置
+        if self.reentry_guard_last_applied_trade_count == self.closed_trade_count:
+            return False
+
         window = max(int(getattr(self.p, "reentry_loss_lookback", 6)), 1)
         threshold = float(getattr(self.p, "reentry_loss_ratio_threshold", 0.67))
         if len(self.recent_trade_results) < window:
@@ -753,6 +760,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
             return False
 
         self.cooldown = max(self.cooldown, int(getattr(self.p, "reentry_cooldown_bars", 4)))
+        self.reentry_guard_last_applied_trade_count = self.closed_trade_count
         self.log(f"[RISK] 连续试错保护触发 | 近{len(self.recent_trade_results)}笔亏损占比={loss_ratio:.2%}，延长冷却")
         return True
 
@@ -1080,6 +1088,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         pnl_pct = 0.0
         if float(trade.price) > 0:
             pnl_pct = float(trade.pnlcomm) / float(trade.price) * 100.0
+        self.closed_trade_count += 1
         self.recent_trade_results.append(float(trade.pnlcomm) > 0.0)
         learner.observe_trade(pnl_pct=pnl_pct, context=self.entry_context)
         if bool(getattr(self.p, "adaptive_save_on_trade", False)):
