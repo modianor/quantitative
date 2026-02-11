@@ -91,6 +91,16 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         swing_stop_loss_pct=6.0,
         swing_profit_take_pct=10.0,
         swing_chand_atr_mult=2.0,
+        # Regime依赖止损（None=自动回退到默认/波段）
+        stop_loss_trend_pct=None,
+        stop_loss_chop_pct=5.5,
+        stop_loss_drawdown_pct=4.5,
+        stop_loss_base_pct=6.5,
+        # Regime依赖Chandelier ATR倍数（None=回退到默认/波段）
+        chand_atr_mult_trend=None,
+        chand_atr_mult_chop=1.8,
+        chand_atr_mult_drawdown=1.6,
+        chand_atr_mult_base=2.1,
         # 主升浪加仓放大（仅在高质量趋势环境下）
         trend_aggressive_scale=1.15,
         trend_confidence_atrp_max=0.07,
@@ -126,8 +136,27 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         base_probe_cooldown=6,
         # BASE 模式金字塔加仓最低盈利门槛（百分比）
         base_pyramid_profit_th=3.0,
+        # 是否按R倍数（浮盈/初始风险）动态放大加仓目标
+        use_r_multiple_pyramiding=True,
+        # R倍数对加仓目标的线性放大系数
+        r_multiple_scale=0.20,
+        # R倍数放大上限，避免过激进
+        r_multiple_cap=2.0,
         # 平仓后冷却 bar 数，避免频繁反复交易
         cooldown_bars=1,
+
+        # ===== 4.5) Time-Series Momentum 过滤 =====
+        # 是否启用Moskowitz(2012)风格的TSMOM过滤
+        use_tsmom_filter=True,
+        # 6M/12M收益率中用于regime判定的回看（日）
+        tsmom_regime_lookback_short=126,
+        tsmom_regime_lookback_long=252,
+        # 3M收益率触发（日）
+        tsmom_trigger_lookback=63,
+        # regime最低收益门槛（short+long均值）
+        tsmom_regime_min_return=0.0,
+        # trigger最低收益门槛
+        tsmom_trigger_min_return=0.0,
 
         # ===== 5) 交易开关 =====
         # 是否仅在“主升浪信号”为真时允许入场
@@ -142,6 +171,8 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         hmm_warmup_bars=240,
         # HMM 切换所需最低置信度
         hmm_min_confidence=0.38,
+        # 若启用HMM，TREND_RUN开仓/加仓要求的最小趋势后验概率
+        hmm_trend_prob_threshold=0.70,
         # HMM 状态切换缓冲天数（防抖）
         hmm_mode_buffer_days=1,
         # 是否按市场后验动态更新HMM转移概率
@@ -279,6 +310,64 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         self.rec_regime = []
         self.rec_mode_name = []
         self.trade_marks = []
+
+    def _tsmom_snapshot(self) -> dict:
+        if not bool(getattr(self.p, "use_tsmom_filter", True)):
+            return {"pass_regime": True, "pass_trigger": True, "regime_return": 0.0, "trigger_return": 0.0}
+
+        d = self.datas[0]
+        lb_s = int(getattr(self.p, "tsmom_regime_lookback_short", 126))
+        lb_l = int(getattr(self.p, "tsmom_regime_lookback_long", 252))
+        lb_t = int(getattr(self.p, "tsmom_trigger_lookback", 63))
+        if len(self) <= max(lb_s, lb_l, lb_t):
+            return {"pass_regime": False, "pass_trigger": False, "regime_return": 0.0, "trigger_return": 0.0}
+
+        close = float(d.close[0])
+        r6 = close / max(float(d.close[-lb_s]), 1e-9) - 1.0
+        r12 = close / max(float(d.close[-lb_l]), 1e-9) - 1.0
+        r3 = close / max(float(d.close[-lb_t]), 1e-9) - 1.0
+
+        regime_ret = 0.5 * (r6 + r12)
+        regime_min = float(getattr(self.p, "tsmom_regime_min_return", 0.0))
+        trigger_min = float(getattr(self.p, "tsmom_trigger_min_return", 0.0))
+        return {
+            "pass_regime": regime_ret >= regime_min,
+            "pass_trigger": r3 >= trigger_min,
+            "regime_return": regime_ret,
+            "trigger_return": r3,
+        }
+
+    def _allow_by_hmm_trend_prob(self, mode_name: str) -> bool:
+        if mode_name != "TREND_RUN" or not bool(getattr(self.p, "use_hmm_regime", True)):
+            return True
+
+        threshold = float(getattr(self.p, "hmm_trend_prob_threshold", 0.70))
+        if threshold <= 0:
+            return True
+
+        trend_prob = getattr(self.regime, "get_trend_probability", lambda: 1.0)()
+        return float(trend_prob) >= threshold
+
+    def _r_multiple_scaled_ratio(self, base_ratio: float, mode_name: str) -> float:
+        if not bool(getattr(self.p, "use_r_multiple_pyramiding", True)) or not self.position:
+            return float(base_ratio)
+
+        close = float(self.datas[0].close[0])
+        cost = float(self.position.price)
+        if cost <= 0:
+            return float(base_ratio)
+
+        if mode_name == "TOP_CHOP":
+            stop_pct = float(getattr(self.p, "swing_stop_loss_pct", 6.0))
+        else:
+            stop_pct = float(getattr(self.p, "stop_loss_pct", 8.0))
+        stop_pct = max(stop_pct, 1e-6)
+
+        r_multiple = ((close / cost - 1.0) * 100.0) / stop_pct
+        cap = float(getattr(self.p, "r_multiple_cap", 2.0))
+        scale = float(getattr(self.p, "r_multiple_scale", 0.20))
+        booster = 1.0 + max(0.0, min(r_multiple, cap)) * scale
+        return float(base_ratio) * booster
 
 
     def _build_meta_features(self, mode_id: int):
@@ -525,6 +614,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
                 if profit_pct >= float(self.p.base_pyramid_profit_th):
                     if self.base_probe_counter == 0:
                         new_ratio = float(self.p.probe_ratio) * (1 + self.base_pyramid_count + 1)
+                        new_ratio = self._r_multiple_scaled_ratio(new_ratio, mode_name)
                         advice = self._meta_advice(mode_id, "PYRAMID", mode_name)
                         if advice["allow"]:
                             adj_ratio = new_ratio * float(advice["size_multiplier"])
@@ -535,6 +625,13 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
                 return
 
             if mode_name != "TREND_RUN":
+                return
+
+            tsmom = self._tsmom_snapshot()
+            if not (tsmom["pass_regime"] and tsmom["pass_trigger"]):
+                return
+
+            if not self._allow_by_hmm_trend_prob(mode_name):
                 return
 
             if self.p.require_main_uptrend and getattr(d, "is_main_uptrend")[0] < 1:
@@ -563,7 +660,8 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
                         if getattr(d, "vol_ratio")[0] >= 1.0:
                             advice = self._meta_advice(mode_id, "TRANCHE2", mode_name)
                             if advice["allow"]:
-                                target_ratio = float(self.p.tranche_targets[1]) * float(advice["size_multiplier"])
+                                target_ratio = self._r_multiple_scaled_ratio(float(self.p.tranche_targets[1]), mode_name)
+                                target_ratio = target_ratio * float(advice["size_multiplier"])
                                 self.pos_mgr.scale_to(target_ratio, "第2档回踩确认", mode_name, "TRANCHE2")
                                 self.tranche = 2
                             self.pb_touched = False
@@ -578,7 +676,8 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
                     if close > float(self.hhv_add[-1]):
                         advice = self._meta_advice(mode_id, "TRANCHE3", mode_name)
                         if advice["allow"]:
-                            target_ratio = float(self.p.tranche_targets[2]) * float(advice["size_multiplier"])
+                            target_ratio = self._r_multiple_scaled_ratio(float(self.p.tranche_targets[2]), mode_name)
+                            target_ratio = target_ratio * float(advice["size_multiplier"])
                             self.pos_mgr.scale_to(target_ratio, "第3档再突破", mode_name, "TRANCHE3")
                             self.tranche = 3
                 return
@@ -652,6 +751,13 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         # TREND_RUN首仓
         if mode_name == "TREND_RUN":
             if active_engine != "TREND_ENGINE":
+                return
+
+            tsmom = self._tsmom_snapshot()
+            if not (tsmom["pass_regime"] and tsmom["pass_trigger"]):
+                return
+
+            if not self._allow_by_hmm_trend_prob(mode_name):
                 return
 
             if self.p.require_main_uptrend and getattr(d, "is_main_uptrend")[0] < 1:

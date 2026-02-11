@@ -199,6 +199,9 @@ class HMMRegimeDetector(TransitionAdaptiveHMMMixin):
 
         return self.last_mode, self.MODE_NAMES[self.last_mode]
 
+    def get_trend_probability(self) -> float:
+        return float(self.posterior[self.MODE_TREND]) if self.posterior else 0.0
+
     def _extract_features(self):
         try:
             close = float(self.strat.data.close[0])
@@ -403,12 +406,36 @@ class ExitManager:
         bias = str(getattr(self.strat, "current_market_bias", "NEUTRAL"))
         return profile == "SWING_CHOP" or bias == "SWING_CHOP"
 
+    def _stop_loss_by_mode(self, mode_name: str) -> float:
+        per_mode = {
+            "TREND_RUN": getattr(self.p, "stop_loss_trend_pct", None),
+            "TOP_CHOP": getattr(self.p, "stop_loss_chop_pct", None),
+            "DRAWDOWN": getattr(self.p, "stop_loss_drawdown_pct", None),
+            "BASE_BUILD": getattr(self.p, "stop_loss_base_pct", None),
+        }
+        mode_stop = per_mode.get(mode_name)
+        if mode_stop is not None:
+            return float(mode_stop)
+        return float(self.p.swing_stop_loss_pct) if self._is_swing_profile() else float(self.p.stop_loss_pct)
+
+    def _chand_mult_by_mode(self, mode_name: str) -> float:
+        per_mode = {
+            "TREND_RUN": getattr(self.p, "chand_atr_mult_trend", None),
+            "TOP_CHOP": getattr(self.p, "chand_atr_mult_chop", None),
+            "DRAWDOWN": getattr(self.p, "chand_atr_mult_drawdown", None),
+            "BASE_BUILD": getattr(self.p, "chand_atr_mult_base", None),
+        }
+        mode_mult = per_mode.get(mode_name)
+        if mode_mult is not None:
+            return float(mode_mult)
+        return float(self.p.swing_chand_atr_mult) if self._is_swing_profile() else float(self.p.chand_atr_mult)
+
     def check_stop_loss(self, mode_name: str) -> bool:
         """票型差异化止损（带盘中模拟）"""
         if not self.strat.position:
             return False
 
-        active_stop_loss = float(self.p.swing_stop_loss_pct) if self._is_swing_profile() else float(self.p.stop_loss_pct)
+        active_stop_loss = self._stop_loss_by_mode(mode_name)
 
         # 高波动票：禁用止损（stop_loss_pct >= 999）
         if active_stop_loss >= 999:
@@ -582,7 +609,7 @@ class ExitManager:
         hh_chand = float(self.strat.hh_chand[0])
 
         # 先用常规Chandelier，若从持仓峰值回撤超阈值，则切到更紧的ATR倍数
-        active_mult = float(self.p.swing_chand_atr_mult) if self._is_swing_profile() else float(self.p.chand_atr_mult)
+        active_mult = self._chand_mult_by_mode(mode_name)
         peak = max(float(getattr(self.strat, "entry_peak_price", close)), close)
         self.strat.entry_peak_price = peak
         peak_drawdown_pct = (close / max(peak, 1e-9) - 1.0) * 100.0
