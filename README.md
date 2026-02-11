@@ -120,6 +120,7 @@ python optimized_hybrid_strategy.py
 | `base_pyramid_profit_th` | 中 | 通常减少交易次数 | BASE 金字塔加仓需要更高浮盈 |
 | `use_hmm_regime` / `hmm_min_confidence` / `hmm_mode_buffer_days` | 中 | 双向影响 | 改变模式识别稳定性与切换频率，间接改变信号触发 |
 | `use_meta_labeling` / `meta_prob_threshold` | 高 | 通常减少交易次数 | 过滤更多入场/加仓信号 |
+| `meta_dynamic_shift_enabled` / `meta_base_shift` / `meta_shift_*` | 高 | 上涨期可提高交易弹性，弱势期自动收缩 | 通过账户回撤/波动/趋势状态动态调整meta阈值，减少人工盯盘调参 |
 
 > 实操建议：如果你目标是“降低交易次数”，优先提高 `vol_ratio_min`、`add_vol_ratio_min`、`cooldown_bars`、`meta_prob_threshold`；如果你目标是“提高交易次数”，反向微调并配合 Walk-forward 验证。
 
@@ -157,9 +158,15 @@ python optimized_hybrid_strategy.py
 | 参数 | 位置 | 含义 | 建议调试范围 |
 |---|---|---|---|
 | `use_meta_labeling` | `strategy.py` | 是否启用在线元标签过滤 | `False`/`True` A-B测试 |
-| `meta_prob_threshold` | `strategy.py` | 信号放行概率阈值 | `0.50~0.60` |
+| `meta_prob_threshold` | `strategy.py` | 信号放行概率阈值 | `0.46~0.60` |
 | `meta_min_samples` | `strategy.py` | 开始使用模型前最小样本数 | `20~80` |
 | `meta_retrain_interval` | `strategy.py` | 每积累多少新样本重训一次 | `5~30` |
+| `meta_dynamic_shift_enabled` | `strategy.py` / `backtest.py` | 是否启用动态阈值调节 | `True` 优先 |
+| `meta_base_shift` | `strategy.py` / `backtest.py` | 全局基础偏移（负值=放松） | `-0.06~0.00` |
+| `meta_shift_uptrend_bonus` | `strategy.py` / `backtest.py` | 主升浪额外放松幅度 | `-0.06~-0.02` |
+| `meta_shift_drawdown_penalty` | `strategy.py` / `backtest.py` | 回撤期额外收紧幅度 | `0.04~0.12` |
+| `meta_shift_vol_penalty` | `strategy.py` / `backtest.py` | 高波动期额外收紧幅度 | `0.02~0.08` |
+| `meta_drawdown_penalty_start/full` | `strategy.py` | 回撤惩罚启动/饱和阈值 | `0.04~0.08` / `0.12~0.25` |
 
 `meta_labeling.py` 还定义了独立组件参数：
 

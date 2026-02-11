@@ -204,9 +204,14 @@ def run_backtest(
         hmm_min_confidence=0.38,
         hmm_mode_buffer_days=1,
         use_meta_labeling=True,
-        meta_prob_threshold=0.50,
+        meta_prob_threshold=0.48,
         meta_min_samples=25,
         meta_retrain_interval=8,
+        meta_dynamic_shift_enabled=True,
+        meta_base_shift=-0.03,
+        meta_shift_uptrend_bonus=-0.04,
+        meta_shift_drawdown_penalty=0.08,
+        meta_shift_vol_penalty=0.05,
         print_log=True,
     )
 
