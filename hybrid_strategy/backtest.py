@@ -8,6 +8,7 @@ import backtrader as bt
 import matplotlib.pyplot as plt
 
 from .data_utils import load_from_yfinance, load_from_csv, detect_main_uptrend, PandasWithSignals
+from .advanced_models import DeflatedSharpeRatio, RiskParityAllocator, RealizedVolatilityEstimator
 from .strategy import OptimizedHybrid4ModeV2
 
 try:
@@ -261,6 +262,22 @@ def run_backtest(
 
     winrate = (won / total_closed * 100) if total_closed else 0.0
     profit_factor = (pnl_won / abs(pnl_lost)) if pnl_lost else float("inf")
+    sharpe_value = sharpe.get('sharperatio', None)
+
+    dsr = None
+    if sharpe_value is not None and len(strat.rec_equity) > 2:
+        eq = pd.Series(strat.rec_equity, dtype=float)
+        daily_ret = eq.pct_change().dropna()
+        if not daily_ret.empty:
+            skew = float(daily_ret.skew()) if len(daily_ret) > 2 else 0.0
+            kurt = float(daily_ret.kurtosis() + 3.0) if len(daily_ret) > 3 else 3.0
+            dsr = DeflatedSharpeRatio.estimate(
+                sharpe=float(sharpe_value),
+                n_returns=len(daily_ret),
+                n_trials=8,
+                skew=skew,
+                kurtosis=kurt,
+            )
 
     print("\n" + "=" * 60)
     print("回测结果 v2.2 (独立配置文件)")
@@ -270,7 +287,8 @@ def run_backtest(
     print(f"最终资金: ${end:,.2f}")
     print(f"总收益: {total_return:.2f}%")
     print(f"最大回撤: {dd.get('max', {}).get('drawdown', 0.0):.2f}%")
-    print(f"Sharpe Ratio: {sharpe.get('sharperatio', None)}")
+    print(f"Sharpe Ratio: {sharpe_value}")
+    print(f"Deflated Sharpe Ratio: {dsr if dsr is not None else 'N/A'}")
     print(f"总交易次数: {total_closed} | 盈利: {won} | 亏损: {lost} | 胜率: {winrate:.2f}%")
     print(f"净盈亏: ${pnl_net:.2f} | 盈亏比: {profit_factor:.2f}")
     print("=" * 60 + "\n")
@@ -281,7 +299,7 @@ def run_backtest(
 # =============================
 # 批量回测工具
 # =============================
-def batch_backtest(symbols=None, tier=None, show_details=False):
+def batch_backtest(symbols=None, tier=None, show_details=False, use_risk_parity=True):
     """批量回测多个股票。
 
     Args:
@@ -312,6 +330,22 @@ def batch_backtest(symbols=None, tier=None, show_details=False):
     print(f"{'=' * 60}\n")
 
     results = []
+    risk_parity_weights = {}
+
+    if use_risk_parity and test_symbols:
+        today = pd.Timestamp.today().normalize()
+        end_date = (today + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        rv = RealizedVolatilityEstimator(lookback=40, method="close")
+        vol_map = {}
+        for symbol in test_symbols:
+            try:
+                hist = load_from_yfinance(symbol, start="2020-01-01", end=end_date)
+                if hist is None or hist.empty:
+                    continue
+                vol_map[symbol] = rv.estimate_from_series(hist["Close"].tolist())
+            except Exception:
+                continue
+        risk_parity_weights = RiskParityAllocator(min_weight=0.02, max_weight=0.35).inverse_vol_weights(vol_map)
 
     for symbol in test_symbols:
         print(f"\n{'🔄' * 30}")
@@ -357,9 +391,11 @@ def batch_backtest(symbols=None, tier=None, show_details=False):
                     "profit_factor": profit_factor,
                     "max_dd": max_dd,
                     "trades": total_closed,
+                    "risk_parity_weight": risk_parity_weights.get(symbol, 0.0),
                 })
 
-                print(f"✅ {symbol}: 收益{total_return:+.2f}% | 胜率{winrate:.1f}% | 盈亏比{profit_factor:.2f}")
+                print(f"✅ {symbol}: 收益{total_return:+.2f}% | 胜率{winrate:.1f}% | 盈亏比{profit_factor:.2f}"
+                      f" | RP权重{risk_parity_weights.get(symbol, 0.0):.2%}")
 
         except Exception as e:
             print(f"❌ {symbol} 测试失败: {e}")
@@ -369,12 +405,12 @@ def batch_backtest(symbols=None, tier=None, show_details=False):
     print(f"\n{'=' * 80}")
     print(f"批量回测汇总")
     print(f"{'=' * 80}")
-    print(f"{'股票':<8} {'收益':>8} {'胜率':>8} {'盈亏比':>8} {'回撤':>8} {'交易次数':>10}")
+    print(f"{'股票':<8} {'收益':>8} {'胜率':>8} {'盈亏比':>8} {'回撤':>8} {'交易次数':>10} {'RP权重':>10}")
     print(f"{'-' * 80}")
 
     for r in sorted(results, key=lambda x: x['return'], reverse=True):
         print(f"{r['symbol']:<8} {r['return']:>7.2f}% {r['win_rate']:>7.1f}% "
-              f"{r['profit_factor']:>8.2f} {r['max_dd']:>7.2f}% {r['trades']:>10}")
+              f"{r['profit_factor']:>8.2f} {r['max_dd']:>7.2f}% {r['trades']:>10} {r.get('risk_parity_weight', 0.0):>9.2%}")
 
     avg_return = sum(r['return'] for r in results) / len(results) if results else 0
     print(f"{'-' * 80}")
