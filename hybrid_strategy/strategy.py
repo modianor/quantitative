@@ -2,6 +2,7 @@
 """策略主体模块。"""
 
 import backtrader as bt
+from collections import deque
 
 from .managers import RegimeDetector, HMMRegimeDetector, PositionManager, ExitManager
 from .meta_labeling import MetaLabelingFilter, TradeMetaRecorder
@@ -67,6 +68,8 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         # 趋势质量阈值：用于加仓过滤
         trend_quality_min_tranche2=0.45,
         trend_quality_min_tranche3=0.56,
+        # TREND_RUN 首仓趋势质量门槛（抑制震荡期假突破）
+        trend_quality_min_entry=0.52,
         # 第2档回踩确认所需连续收盘天数
         tranche2_confirm_bars=2,
         # 波段回踩识别窗口（bar）
@@ -196,6 +199,10 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         r_multiple_cap=2.0,
         # 平仓后冷却 bar 数，避免频繁反复交易
         cooldown_bars=1,
+        # 连续试错保护：最近窗口内亏损占比过高时，延长空仓冷却
+        reentry_loss_lookback=6,
+        reentry_loss_ratio_threshold=0.67,
+        reentry_cooldown_bars=4,
 
         # ===== 4.5) Time-Series Momentum 过滤 =====
         # 是否启用Moskowitz(2012)风格的TSMOM过滤
@@ -380,6 +387,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         }
         self.shadow_trades = []
         self.shadow_completed = []
+        self.recent_trade_results = deque(maxlen=max(int(getattr(self.p, "reentry_loss_lookback", 6)), 1))
 
         self.meta_filter = MetaLabelingFilter(
             prob_threshold=float(self.p.meta_prob_threshold),
@@ -729,6 +737,25 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         self.last_exit_price = None
         self.last_exit_reason = None
 
+    def _reentry_guard_active(self, mode_name: str) -> bool:
+        """在震荡试错密集期自动延长冷却，降低无效交易密度。"""
+        if mode_name != "TREND_RUN":
+            return False
+
+        window = max(int(getattr(self.p, "reentry_loss_lookback", 6)), 1)
+        threshold = float(getattr(self.p, "reentry_loss_ratio_threshold", 0.67))
+        if len(self.recent_trade_results) < window:
+            return False
+
+        losses = sum(1 for is_win in self.recent_trade_results if not is_win)
+        loss_ratio = losses / max(len(self.recent_trade_results), 1)
+        if loss_ratio < threshold:
+            return False
+
+        self.cooldown = max(self.cooldown, int(getattr(self.p, "reentry_cooldown_bars", 4)))
+        self.log(f"[RISK] 连续试错保护触发 | 近{len(self.recent_trade_results)}笔亏损占比={loss_ratio:.2%}，延长冷却")
+        return True
+
     def next(self):
         d = self.datas[0]
         dt = d.datetime.date(0)
@@ -969,6 +996,9 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
             if active_engine != "TREND_ENGINE":
                 return
 
+            if self._reentry_guard_active(mode_name):
+                return
+
             tsmom = self._tsmom_snapshot()
             if not (tsmom["pass_regime"] and tsmom["pass_trigger"]):
                 return
@@ -985,6 +1015,9 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
             )
             is_swing_entry = self._should_open_swing_entry(d)
             if not (is_breakout_entry or is_swing_entry):
+                return
+
+            if self._trend_quality_score() < float(getattr(self.p, "trend_quality_min_entry", 0.52)):
                 return
 
             if self._vol_zscore() < float(getattr(self.p, "entry_vol_zscore_min", 0.5)):
@@ -1047,6 +1080,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         pnl_pct = 0.0
         if float(trade.price) > 0:
             pnl_pct = float(trade.pnlcomm) / float(trade.price) * 100.0
+        self.recent_trade_results.append(float(trade.pnlcomm) > 0.0)
         learner.observe_trade(pnl_pct=pnl_pct, context=self.entry_context)
         if bool(getattr(self.p, "adaptive_save_on_trade", False)):
             learner.save_state()
