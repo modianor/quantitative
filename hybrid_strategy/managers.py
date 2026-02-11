@@ -61,8 +61,12 @@ class RegimeDetector:
         hh = max(float(self.strat.hh_stage[0]), 1e-9)
         dd = close / hh - 1.0
         atrp = float(self.strat.atr[0]) / max(close, 1e-9)
+        kline_view = self._infer_kline_pattern_view()
 
         if dd <= float(self.p.dd_drawdown_th) or atrp >= float(self.p.atrp_drawdown_th):
+            # 若只是“趋势内健康回撤”，避免过早切到 DRAWDOWN
+            if kline_view == "PULLBACK_CONTINUATION":
+                return self.MODE_TREND, self.MODE_NAMES[self.MODE_TREND]
             return self.MODE_DRAWDOWN, self.MODE_NAMES[self.MODE_DRAWDOWN]
 
         in_high_zone = dd >= float(self.p.high_zone_dd_th)
@@ -73,6 +77,9 @@ class RegimeDetector:
         if in_high_zone and (atr_shrink or cross_cnt >= int(self.p.cross_top_min)):
             return self.MODE_TOPCHOP, self.MODE_NAMES[self.MODE_TOPCHOP]
 
+        if in_high_zone and kline_view == "CHOP":
+            return self.MODE_TOPCHOP, self.MODE_NAMES[self.MODE_TOPCHOP]
+
         in_base_zone = dd <= float(self.p.base_zone_dd_th)
         atr_ok = atrp <= float(self.p.base_atrp_th)
         hl_up = self._check_higher_lows(self.p.base_hl_consecutive)
@@ -81,6 +88,67 @@ class RegimeDetector:
             return self.MODE_BASE, self.MODE_NAMES[self.MODE_BASE]
 
         return self.MODE_TREND, self.MODE_NAMES[self.MODE_TREND]
+
+    def _infer_kline_pattern_view(self) -> str:
+        """用近端K线行为模拟“人眼”读取，辅助识别震荡与回撤中继。"""
+        if not bool(getattr(self.p, "use_kline_pattern_inference", True)):
+            return "NONE"
+
+        lookback = int(max(getattr(self.p, "kline_pattern_lookback", 18), 6))
+        if len(self.strat) < lookback + 2:
+            return "NONE"
+
+        closes = [float(self.strat.data.close[-i]) for i in range(lookback, -1, -1)]
+        if min(closes) <= 0:
+            return "NONE"
+
+        returns = []
+        for i in range(1, len(closes)):
+            ret = closes[i] / closes[i - 1] - 1.0
+            returns.append(ret)
+
+        if not returns:
+            return "NONE"
+
+        sign_flips = 0
+        valid_pairs = 0
+        for i in range(1, len(returns)):
+            prev = returns[i - 1]
+            curr = returns[i]
+            if abs(prev) < 1e-6 or abs(curr) < 1e-6:
+                continue
+            valid_pairs += 1
+            if (prev > 0 and curr < 0) or (prev < 0 and curr > 0):
+                sign_flips += 1
+
+        flip_ratio = sign_flips / max(valid_pairs, 1)
+        first_close = closes[0]
+        last_close = closes[-1]
+        net_move = last_close / first_close - 1.0
+        range_pct = (max(closes) - min(closes)) / max(last_close, 1e-9)
+        pullback_from_peak = last_close / max(max(closes), 1e-9) - 1.0
+
+        if (
+            abs(net_move) <= float(getattr(self.p, "kline_chop_net_move_max", 0.03))
+            and flip_ratio >= float(getattr(self.p, "kline_chop_flip_ratio_min", 0.55))
+            and range_pct <= float(getattr(self.p, "kline_chop_range_max", 0.12))
+        ):
+            return "CHOP"
+
+        ema20_now = float(self.strat.ema20[0])
+        ema50_now = float(self.strat.ema50[0])
+        ema20_prev = float(self.strat.ema20[-min(5, len(self.strat.ema20) - 1)])
+        trend_up = ema20_now >= ema50_now and ema20_now >= ema20_prev
+
+        if (
+            trend_up
+            and pullback_from_peak <= float(getattr(self.p, "kline_pullback_max_dd", -0.03))
+            and pullback_from_peak >= float(getattr(self.p, "kline_pullback_min_dd", -0.12))
+            and net_move >= float(getattr(self.p, "kline_pullback_net_up_min", 0.05))
+        ):
+            return "PULLBACK_CONTINUATION"
+
+        return "NONE"
 
     def _get_atr_ma(self):
         if len(self.strat.atr) < 20:
