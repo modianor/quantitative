@@ -87,6 +87,13 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         break_even_trigger_pct=4.0,
         # 保本线缓冲（百分比，防止过早扫损）
         break_even_buffer_pct=0.2,
+        # 震荡/波段单独参数：见好就收 + 更紧止损
+        swing_stop_loss_pct=6.0,
+        swing_profit_take_pct=10.0,
+        swing_chand_atr_mult=2.0,
+        # 主升浪加仓放大（仅在高质量趋势环境下）
+        trend_aggressive_scale=1.15,
+        trend_confidence_atrp_max=0.07,
 
         # ===== 4) 模式识别/切换参数 =====
         # 最低可交易 K 线数量（确保 EMA200 等长周期指标稳定）
@@ -234,6 +241,8 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         self.base_probe_counter = 0
         self.base_pyramid_count = 0
         self.entry_peak_price = 0.0
+        self.entry_profile = "NEUTRAL"
+        self.current_market_bias = "NEUTRAL"
 
         self.rule_regime = RegimeDetector(self)
         self.regime = HMMRegimeDetector(self, fallback_detector=self.rule_regime) if self.p.use_hmm_regime else self.rule_regime
@@ -360,6 +369,38 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
     def _active_engine(self, mode_name: str) -> str:
         return self.engine_by_mode.get(mode_name, "TREND_ENGINE")
 
+    def _market_bias_profile(self, mode_name: str) -> str:
+        """基于日线判断当前更像主升浪还是震荡波段。"""
+        d = self.datas[0]
+        close = float(d.close[0])
+        atrp = float(self.atr[0]) / max(close, 1e-9)
+        trend_score = float(getattr(d, "trend_score")[0])
+        mom_score = float(getattr(d, "mom_score")[0]) if hasattr(d, "mom_score") else 0.0
+        ema20 = float(self.ema20[0])
+        ema50 = float(self.ema50[0])
+        ema200 = float(self.ema200[0])
+
+        strong_trend = (
+            mode_name == "TREND_RUN"
+            and trend_score >= 4
+            and mom_score >= 2
+            and close > ema20 > ema50 > ema200
+            and atrp <= float(self.p.trend_confidence_atrp_max)
+        )
+        if strong_trend:
+            return "MAIN_UPTREND"
+
+        range_like = (
+            mode_name == "TOP_CHOP"
+            or close <= ema20
+            or ema20 <= ema50
+            or trend_score <= float(self.p.swing_trend_score_min)
+        )
+        if range_like:
+            return "SWING_CHOP"
+
+        return "NEUTRAL"
+
     def _meta_advice(self, mode_id: int, signal_tag: str, mode_name: str) -> dict:
         if not bool(self.p.use_meta_labeling):
             return {"allow": True, "size_multiplier": 1.0, "wait_bars": 0, "proba": 0.5, "tier": "OFF"}
@@ -414,6 +455,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
 
         mode_id, mode_name = self.regime.get_mode()
         active_engine = self._active_engine(mode_name)
+        self.current_market_bias = self._market_bias_profile(mode_name)
         self._update_shadow_trades()
 
         self.rec_dates.append(dt)
@@ -574,6 +616,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
             if not advice["allow"]:
                 return
             range_ratio = min(float(self.p.probe_ratio), float(self.p.tranche_targets[0]))
+            self.entry_profile = "SWING_CHOP"
             self.pos_mgr.scale_to(range_ratio * float(advice["size_multiplier"]), "区间引擎试探仓", mode_name, "RANGE_PROBE")
             return
 
@@ -602,6 +645,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
             advice = self._meta_advice(mode_id, "PROBE", mode_name)
             if not advice["allow"]:
                 return
+            self.entry_profile = "NEUTRAL"
             self.pos_mgr.scale_to(float(self.p.probe_ratio) * float(advice["size_multiplier"]), "BASE试探仓", mode_name, "PROBE")
             return
 
@@ -636,7 +680,11 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
             advice = self._meta_advice(mode_id, entry_tag, mode_name)
             if not advice["allow"]:
                 return
-            self.pos_mgr.scale_to(float(self.p.tranche_targets[0]) * float(advice["size_multiplier"]), entry_reason, mode_name, entry_tag)
+            base_ratio = float(self.p.tranche_targets[0])
+            if self.current_market_bias == "MAIN_UPTREND" and is_breakout_entry:
+                base_ratio = min(base_ratio * float(self.p.trend_aggressive_scale), float(self.p.tranche_targets[1]))
+            self.entry_profile = self.current_market_bias if is_breakout_entry else "SWING_CHOP"
+            self.pos_mgr.scale_to(base_ratio * float(advice["size_multiplier"]), entry_reason, mode_name, entry_tag)
             return
 
     def notify_order(self, order):
@@ -654,6 +702,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         self.profit_taken = False
         self.base_pyramid_count = 0
         self.entry_peak_price = 0.0
+        self.entry_profile = "NEUTRAL"
 
     def _should_open_swing_entry(self, d) -> bool:
         if len(self) < int(self.p.swing_pullback_lookback) + 3:
