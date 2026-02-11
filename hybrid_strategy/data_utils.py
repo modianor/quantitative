@@ -93,7 +93,7 @@ def load_from_csv(csv_path: str):
 # 自定义 DataFeed
 # =============================
 class PandasWithSignals(bt.feeds.PandasData):
-    lines = ("is_main_uptrend", "main_uptrend_start", "trend_score", "mom_score", "pb_score", "vol_ratio")
+    lines = ("is_main_uptrend", "main_uptrend_start", "trend_score", "mom_score", "pb_score", "vol_ratio", "vol_zscore")
     params = (
         ("is_main_uptrend", -1),
         ("main_uptrend_start", -1),
@@ -101,6 +101,7 @@ class PandasWithSignals(bt.feeds.PandasData):
         ("mom_score", -1),
         ("pb_score", -1),
         ("vol_ratio", -1),
+        ("vol_zscore", -1),
     )
     # 👇 添加这两行
     def __init__(self):
@@ -160,7 +161,9 @@ def detect_main_uptrend(df: pd.DataFrame,
     df["EMA200"] = ema(df["Close"], ma_slow)
 
     df["VOL_MA20"] = df["Volume"].rolling(vol_ma, min_periods=vol_ma).mean()
+    df["VOL_STD20"] = df["Volume"].rolling(vol_ma, min_periods=vol_ma).std()
     df["VOL_RATIO"] = df["Volume"] / df["VOL_MA20"]
+    df["VOL_ZSCORE"] = (df["Volume"] - df["VOL_MA20"]) / df["VOL_STD20"].replace(0, pd.NA)
 
     df["ATR14"] = atr(df, 14)
     df["CLV"] = clv(df)

@@ -229,6 +229,7 @@ def run_backtest(
     df2["mom_score"] = df2["MomScore"].fillna(0).astype(int)
     df2["pb_score"] = df2["PbScore"].fillna(0).astype(int)
     df2["vol_ratio"] = df2["VOL_RATIO"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    df2["vol_zscore"] = df2["VOL_ZSCORE"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     # 5. Cerebro
     cerebro = bt.Cerebro()

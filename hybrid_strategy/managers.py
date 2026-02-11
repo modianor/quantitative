@@ -505,6 +505,22 @@ class ExitManager:
             return float(mode_mult)
         return float(self.p.swing_chand_atr_mult) if self._is_swing_profile() else float(self.p.chand_atr_mult)
 
+    def _apply_dynamic_chand_mult(self, base_mult: float, close: float, atrv: float) -> float:
+        if not bool(getattr(self.p, "dynamic_chand_enabled", True)):
+            return float(base_mult)
+
+        atrp = atrv / max(close, 1e-9)
+        low_th = float(getattr(self.p, "dynamic_chand_atrp_low", 0.025))
+        high_th = float(getattr(self.p, "dynamic_chand_atrp_high", 0.070))
+        low_mult = float(getattr(self.p, "dynamic_chand_mult_low_vol", 1.5))
+        high_mult = float(getattr(self.p, "dynamic_chand_mult_high_vol", 3.0))
+
+        if atrp >= high_th:
+            return max(float(base_mult), high_mult)
+        if atrp <= low_th:
+            return min(float(base_mult), low_mult)
+        return float(base_mult)
+
     def _in_burst_guard(self, mode_name: str) -> bool:
         """放量急拉后的保护期：避免过早被噪声回撤洗出。"""
         if mode_name != "TREND_RUN":
@@ -704,6 +720,7 @@ class ExitManager:
         # 先用常规Chandelier，若从持仓峰值回撤超阈值，则切到更紧的ATR倍数
         in_burst_guard = self._in_burst_guard(mode_name)
         active_mult = self._chand_mult_by_mode(mode_name)
+        active_mult = self._apply_dynamic_chand_mult(active_mult, close=close, atrv=atrv)
         if in_burst_guard:
             active_mult += float(getattr(self.p, "burst_chand_mult_bonus", 0.6))
 

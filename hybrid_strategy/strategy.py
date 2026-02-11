@@ -62,6 +62,13 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         swing_vol_ratio_min=0.75,
         # 波段回踩入场要求的最低趋势分
         swing_trend_score_min=3,
+        # 成交量z-score门槛：过滤无量试探单
+        entry_vol_zscore_min=0.5,
+        # 趋势质量阈值：用于加仓过滤
+        trend_quality_min_tranche2=0.60,
+        trend_quality_min_tranche3=0.72,
+        # 第2档回踩确认所需连续收盘天数
+        tranche2_confirm_bars=2,
         # 波段回踩识别窗口（bar）
         swing_pullback_lookback=8,
         # 入场后可容忍回撤（超过可能减仓/退出）
@@ -78,6 +85,12 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         fast_chand_atr_mult=1.9,
         # 是否允许使用当日最低价触发 Chandelier（模拟日内风控）
         chand_use_intraday_low=True,
+        # 按ATR%动态调节Chandelier倍数
+        dynamic_chand_enabled=True,
+        dynamic_chand_atrp_low=0.025,
+        dynamic_chand_atrp_high=0.070,
+        dynamic_chand_mult_low_vol=1.5,
+        dynamic_chand_mult_high_vol=3.0,
         # ATR 指标周期
         atr_period=14,
         # 硬止损阈值（百分比），例如 8.0 表示 -8% 止损
@@ -315,6 +328,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         self.ema20 = bt.ind.EMA(d.close, period=20)
         self.ema50 = bt.ind.EMA(d.close, period=50)
         self.ema200 = bt.ind.EMA(d.close, period=200)
+        self.adx = bt.ind.ADX(d, period=14)
 
         self.hh_chand = bt.ind.Highest(d.high, period=self.p.chand_period)
         self.hhv_entry = bt.ind.Highest(d.close, period=self.p.breakout_n)
@@ -326,6 +340,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         self.cooldown = 0
         self.tranche = 0
         self.pb_touched = False
+        self.tranche2_confirm_count = 0
         self.profit_taken = False
         self.base_probe_counter = 0
         self.base_pyramid_count = 0
@@ -438,6 +453,35 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
         booster = 1.0 + max(0.0, min(r_multiple, cap)) * scale
         return float(base_ratio) * booster
 
+
+    def _trend_quality_score(self) -> float:
+        d = self.datas[0]
+        close = float(d.close[0])
+        if close <= 0:
+            return 0.0
+
+        adx_raw = float(self.adx[0]) if len(self.adx) > 0 else 0.0
+        adx_norm = min(max((adx_raw - 15.0) / 25.0, 0.0), 1.0)
+
+        slope = 0.0
+        if len(self) > int(self.p.slope_win):
+            slope = float(self.ema20[0]) / max(float(self.ema20[-int(self.p.slope_win)]), 1e-9) - 1.0
+        slope_norm = min(max((slope * 100.0) / 3.0, 0.0), 1.0)
+
+        trend_score_norm = min(max(float(getattr(d, "trend_score")[0]) / 6.0, 0.0), 1.0)
+
+        atr_ma = sum(float(self.atr[-i]) for i in range(min(len(self.atr), 20))) / max(min(len(self.atr), 20), 1)
+        atr_ratio = float(self.atr[0]) / max(atr_ma, 1e-9)
+        atr_penalty = min(max((atr_ratio - 1.0) / 0.6, 0.0), 1.0)
+
+        score = 0.35 * adx_norm + 0.25 * slope_norm + 0.30 * trend_score_norm + 0.10 * (1.0 - atr_penalty)
+        return min(max(score, 0.0), 1.0)
+
+    def _vol_zscore(self) -> float:
+        d = self.datas[0]
+        if hasattr(d, "vol_zscore"):
+            return float(getattr(d, "vol_zscore")[0])
+        return 0.0
 
     def _build_meta_features(self, mode_id: int):
         d = self.datas[0]
@@ -776,16 +820,28 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
                 if lower <= float(d.low[0]) <= upper:
                     self.pb_touched = True
 
+                tq = self._trend_quality_score()
+                if tq < float(getattr(self.p, "trend_quality_min_tranche2", 0.60)):
+                    self.tranche2_confirm_count = 0
+                    return
+
                 if self.pb_touched:
-                    if (not self.p.rebound_confirm) or (close > ema20):
-                        if getattr(d, "vol_ratio")[0] >= 1.0:
-                            advice = self._meta_advice(mode_id, "TRANCHE2", mode_name)
-                            if advice["allow"]:
-                                target_ratio = self._r_multiple_scaled_ratio(float(self.p.tranche_targets[1]), mode_name)
-                                target_ratio = target_ratio * float(advice["size_multiplier"])
-                                self.pos_mgr.scale_to(target_ratio, "第2档回踩确认", mode_name, "TRANCHE2")
-                                self.tranche = 2
-                            self.pb_touched = False
+                    rebound_ok = (not self.p.rebound_confirm) or (close > ema20)
+                    volume_ok = getattr(d, "vol_ratio")[0] >= 1.0 and self._vol_zscore() >= float(getattr(self.p, "entry_vol_zscore_min", 0.5))
+                    if rebound_ok and volume_ok:
+                        self.tranche2_confirm_count += 1
+                    else:
+                        self.tranche2_confirm_count = 0
+
+                    if self.tranche2_confirm_count >= int(getattr(self.p, "tranche2_confirm_bars", 2)):
+                        advice = self._meta_advice(mode_id, "TRANCHE2", mode_name)
+                        if advice["allow"]:
+                            target_ratio = self._r_multiple_scaled_ratio(float(self.p.tranche_targets[1]), mode_name)
+                            target_ratio = target_ratio * float(advice["size_multiplier"])
+                            self.pos_mgr.scale_to(target_ratio, "第2档回踩确认", mode_name, "TRANCHE2")
+                            self.tranche = 2
+                        self.pb_touched = False
+                        self.tranche2_confirm_count = 0
                 return
 
             # 第3档
@@ -793,15 +849,18 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
                 if getattr(d, "trend_score")[0] < 4:
                     return
 
+                if self._trend_quality_score() < float(getattr(self.p, "trend_quality_min_tranche3", 0.72)):
+                    return
+
                 add_vol_ratio_min = self.get_adaptive_param("add_vol_ratio_min", float(self.p.add_vol_ratio_min))
-                if getattr(d, "vol_ratio")[0] >= add_vol_ratio_min:
-                    if close > float(self.hhv_add[-1]):
-                        advice = self._meta_advice(mode_id, "TRANCHE3", mode_name)
-                        if advice["allow"]:
-                            target_ratio = self._r_multiple_scaled_ratio(float(self.p.tranche_targets[2]), mode_name)
-                            target_ratio = target_ratio * float(advice["size_multiplier"])
-                            self.pos_mgr.scale_to(target_ratio, "第3档再突破", mode_name, "TRANCHE3")
-                            self.tranche = 3
+                volume_ok = getattr(d, "vol_ratio")[0] >= add_vol_ratio_min and self._vol_zscore() >= float(getattr(self.p, "entry_vol_zscore_min", 0.5))
+                if volume_ok and close > float(self.hhv_add[-1]):
+                    advice = self._meta_advice(mode_id, "TRANCHE3", mode_name)
+                    if advice["allow"]:
+                        target_ratio = self._r_multiple_scaled_ratio(float(self.p.tranche_targets[2]), mode_name)
+                        target_ratio = target_ratio * float(advice["size_multiplier"])
+                        self.pos_mgr.scale_to(target_ratio, "第3档再突破", mode_name, "TRANCHE3")
+                        self.tranche = 3
                 return
 
             return
@@ -833,6 +892,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
                 return
 
             self.tranche = 0
+            self.tranche2_confirm_count = 0
             advice = self._meta_advice(mode_id, "RANGE_PROBE", mode_name)
             if not advice["allow"]:
                 return
@@ -860,6 +920,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
 
             self.tranche = 0
             self.pb_touched = False
+            self.tranche2_confirm_count = 0
             self.profit_taken = False
             self.base_pyramid_count = 0
             self.base_probe_counter = self.p.base_probe_cooldown
@@ -893,12 +954,16 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
             if not (is_breakout_entry or is_swing_entry):
                 return
 
+            if self._vol_zscore() < float(getattr(self.p, "entry_vol_zscore_min", 0.5)):
+                return
+
             env = self._market_environment_snapshot()
             if env["is_weak"]:
                 return
 
             self.tranche = 1
             self.pb_touched = False
+            self.tranche2_confirm_count = 0
             self.profit_taken = False
             self.base_pyramid_count = 0
             self.entry_peak_price = float(d.close[0])
@@ -962,6 +1027,7 @@ class OptimizedHybrid4ModeV2(bt.Strategy):
     def _reset_state(self):
         self.tranche = 0
         self.pb_touched = False
+        self.tranche2_confirm_count = 0
         self.profit_taken = False
         self.base_pyramid_count = 0
         self.entry_peak_price = 0.0
